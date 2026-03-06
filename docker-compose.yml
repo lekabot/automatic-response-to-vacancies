@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  hh-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: hh-assistant
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      CONFIG_PATH: /app/config.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+    volumes:
+      # Персистентные данные (SQLite база)
+      - ./data:/data
+      # Конфиг монтируется как read-only — редактируй на хосте
+      - ./config.yaml:/app/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
