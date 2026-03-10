@@ -90,6 +90,7 @@ _PROMPT_PASSWORD = (
     "<i>Данные хранятся только на вашем сервере и не передаются третьим лицам.</i>"
 )
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ _PROMPT_PASSWORD = (
 
 def _settings_text(s: UserSettings) -> str:
     kws = s.keywords
-    kw_str = ", ".join(kws[:5]) + (f" (+{len(kws)-5})" if len(kws) > 5 else "")
+    kw_str = ", ".join(kws[:5]) + (f" (+{len(kws) - 5})" if len(kws) > 5 else "")
     letter = "Да" if s.cover_letter else "Нет"
     account = _esc(s.hh_email or "—")
     resume = _esc(s.resume_title or s.resume_id or "—")
@@ -131,6 +132,12 @@ async def _login_and_get_resumes(email: str, password: str) -> tuple[bool, list[
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    log.info(
+        "cmd_start.called",
+        chat_id=update.effective_chat.id,
+        text=update.message.text if update.message else None,
+    )
+
     chat_id = update.effective_chat.id
     settings = await db.get_user_settings(chat_id)
 
@@ -472,14 +479,14 @@ async def _hourly_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _search_task(
-    *,
-    chat_id: int,
-    settings: UserSettings,
-    bot,
-    cancel_event: asyncio.Event,
-    status_msg_id: int,
-    job_queue,
-    daily_limit: int,
+        *,
+        chat_id: int,
+        settings: UserSettings,
+        bot,
+        cancel_event: asyncio.Event,
+        status_msg_id: int,
+        job_queue,
+        daily_limit: int,
 ) -> None:
     from src.pipeline import run_user_pipeline
 
