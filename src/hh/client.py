@@ -120,43 +120,36 @@ class HHClient:
 
     async def login(self, email: str, password: str) -> bool:
         """
-        Авторизация через web-сессию hh.ru (двухшаговый flow).
+        Авторизация через web-сессию hh.ru.
 
-        0. GET hh.ru — устанавливаем начальные куки сессии.
-        1. GET /account/login — получаем XSRF из cookie или page-JSON.
-        2. POST только email — первый шаг формы.
-        3. POST email + password — второй шаг (финальный логин).
-        4. Проверяем cookie hhtoken или final URL.
+        1. GET hh.ru — устанавливаем сессионные куки (hhuid, _xsrf и др.).
+        2. GET /account/login — получаем XSRF из page-JSON или cookie.
+        3. POST /account/login — отправляем email + password.
+        4. Проверяем cookie hhtoken или итоговый URL.
         """
         if not email or not password:
             log.warning("hh.login.skipped", reason="empty_credentials")
             return False
 
-        _login_url = f"{WEB_BASE}/account/login?role=applicant&backUrl=%2F"
-        _post_headers = {"Content-Type": "application/x-www-form-urlencoded", "Referer": _login_url}
+        _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
 
         try:
-            # Шаг 0: установить сессионные куки
+            # Устанавливаем сессионные куки — hh.ru требует hhuid до логина
             await self._rate.acquire()
             await self._client.get(f"{WEB_BASE}/", follow_redirects=True)
 
-            # Шаг 1: страница логина → XSRF
+            # Получаем XSRF
             resp = await self._get(_login_url)
             xsrf = self._xsrf() or self._extract_xsrf(resp.text)
+            log.info(
+                "hh.login.xsrf",
+                xsrf_found=bool(xsrf),
+                cookies=list(self._client.cookies.keys()),
+            )
             if not xsrf:
                 log.error("hh.login.no_xsrf")
                 return False
 
-            # Шаг 2: POST только email
-            await self._client.post(
-                _login_url,
-                data={"login": email, "_xsrf": xsrf, "backUrl": "/", "remember": "yes"},
-                headers={**_post_headers, "X-XSRFToken": xsrf},
-                follow_redirects=True,
-            )
-            xsrf = self._xsrf() or xsrf  # обновляем XSRF
-
-            # Шаг 3: POST email + password
             login_resp = await self._client.post(
                 _login_url,
                 data={
@@ -166,7 +159,11 @@ class HHClient:
                     "backUrl": "/",
                     "remember": "yes",
                 },
-                headers={**_post_headers, "X-XSRFToken": xsrf},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": _login_url,
+                    "X-XSRFToken": xsrf,
+                },
                 follow_redirects=True,
             )
 
@@ -174,14 +171,19 @@ class HHClient:
                 log.error(
                     "hh.login.bad_response",
                     status=login_resp.status_code,
-                    body=login_resp.text[:600],
+                    body=login_resp.text[:300],
                 )
                 return False
 
             self._logged_in = bool(self._client.cookies.get("hhtoken")) or (
                 "/account/login" not in str(login_resp.url)
             )
-            log.info("hh.login.result", success=self._logged_in, final_url=str(login_resp.url))
+            log.info(
+                "hh.login.result",
+                success=self._logged_in,
+                final_url=str(login_resp.url),
+                has_hhtoken=bool(self._client.cookies.get("hhtoken")),
+            )
             return self._logged_in
 
         except Exception as exc:
