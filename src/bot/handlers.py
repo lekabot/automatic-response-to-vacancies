@@ -29,7 +29,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
 from src import database as db
 from src.bot.formatters import format_final_summary, format_hourly_summary
 from src.bot.keyboards import (
@@ -132,12 +131,6 @@ async def _login_and_get_resumes(email: str, password: str) -> tuple[bool, list[
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    log.info(
-        "cmd_start.called",
-        chat_id=update.effective_chat.id,
-        text=update.message.text if update.message else None,
-    )
-
     chat_id = update.effective_chat.id
     settings = await db.get_user_settings(chat_id)
 
@@ -604,6 +597,17 @@ def register_handlers(app: Application) -> None:
         fallbacks=[CommandHandler("start", cmd_start)],
         per_user=True,
         per_chat=True,
+        per_message=False,
         allow_reentry=True,
     )
     app.add_handler(conv)
+    app.add_error_handler(on_error)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error(
+        "telegram.handler.error",
+        error=str(context.error),
+        update=str(update)[:1000] if update else None,
+        exc_info=context.error,
+    )

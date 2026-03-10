@@ -70,7 +70,8 @@ def _run_migrations(sqlite_path: str) -> None:
         from alembic import command
 
         cfg = Config("alembic.ini")
-        cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{sqlite_path}")
+        # Sync driver — asyncio.run() нельзя звать из уже запущенного loop
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{sqlite_path}")
         command.upgrade(cfg, "head")
     except Exception as exc:
         structlog.get_logger(__name__).warning("migrations.skipped", error=str(exc))
