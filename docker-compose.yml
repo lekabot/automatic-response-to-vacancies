@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   hh-assistant:
     build:
@@ -13,13 +11,12 @@ services:
       - .env
 
     environment:
-      CONFIG_PATH: /app/config.yaml
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
     volumes:
-      # Персистентные данные (SQLite база)
-      - ./data:/data
-      # Конфиг монтируется как read-only — редактируй на хосте
+      # Именованный том — данные сохраняются между деплоями независимо от workspace
+      - hh_data:/data
+      # config.yaml берётся из репо, монтируется read-only
       - ./config.yaml:/app/config.yaml:ro
 
     healthcheck:
@@ -30,7 +27,11 @@ services:
       start_period: 15s
 
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  hh_data:
+    name: hh_data

@@ -7,20 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# ──────────────────────────────────────────────
-# GitHub Secrets (обязательные):
-#   TELEGRAM_BOT_TOKEN  — токен от @BotFather
-#   SSH_HOST            — IP или hostname сервера
-#   SSH_USER            — пользователь на сервере
-#   SSH_KEY             — приватный SSH-ключ (RSA/Ed25519)
-#
-# GitHub Variables (опциональные, с дефолтами):
-#   SSH_PORT            — SSH порт (default: 22)
-#   DEPLOY_PATH         — путь на сервере (default: /opt/hh-assistant)
-# ──────────────────────────────────────────────
+# Один деплой за раз — новый пуш отменяет предыдущий в очереди
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Secrets:   TELEGRAM_BOT_TOKEN
+# GitHub Variables: DEPLOY_PATH  (например /opt/hh-assistant)
+# ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
-  # ── Тесты ─────────────────────────────────────────────────────────────────
+  # ── Тесты (GitHub-hosted, не засоряет сервер) ─────────────────────────────
   test:
     name: Tests
     runs-on: ubuntu-latest
@@ -41,46 +39,59 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  # ── Деплой ────────────────────────────────────────────────────────────────
+  # ── Деплой (self-hosted runner на сервере) ────────────────────────────────
   deploy:
     name: Deploy
     needs: test
-    runs-on: ubuntu-latest
-
-    # Деплоим только при пуше в main (не на PR)
+    runs-on: [self-hosted, linux, x64]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
+    env:
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ vars.SSH_PORT || 22 }}
-          envs: TELEGRAM_BOT_TOKEN
-          script: |
-            set -euo pipefail
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            DEPLOY_PATH="${{ vars.DEPLOY_PATH || '/opt/hh-assistant' }}"
+      - name: Ensure deploy path exists
+        run: |
+          set -euo pipefail
+          mkdir -p "${DEPLOY_PATH}"
 
-            # Первичная инициализация репозитория (если ещё нет)
-            if [ ! -d "$DEPLOY_PATH/.git" ]; then
-              git clone "${{ github.server_url }}/${{ github.repository }}.git" "$DEPLOY_PATH"
-            fi
+      - name: Sync project to deploy path
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".venv" \
+            --exclude "__pycache__" \
+            --exclude "*.pyc" \
+            --exclude ".pytest_cache" \
+            --exclude "*.egg-info" \
+            --exclude "data/" \
+            ./ "${DEPLOY_PATH}/"
 
-            cd "$DEPLOY_PATH"
+      - name: Write .env
+        run: |
+          set -euo pipefail
+          cat > "${DEPLOY_PATH}/.env" <<EOF
+          TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+          EOF
+          chmod 600 "${DEPLOY_PATH}/.env"
 
-            git fetch origin main
-            git reset --hard origin/main
+      - name: Deploy with Docker Compose
+        run: |
+          set -euo pipefail
+          cd "${DEPLOY_PATH}"
+          docker compose up -d --build --remove-orphans
+          docker image prune -f
 
-            # Создаём .env из GitHub Secrets (не коммитится в репо)
-            printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" > .env
-
-            # Пересобираем и запускаем контейнеры
-            docker compose pull --quiet
-            docker compose up -d --build --remove-orphans
-
-            echo "✅ Deploy complete: $(git log -1 --oneline)"
+      - name: Verify container is running
+        run: |
+          set -euo pipefail
+          sleep 5
+          STATUS=$(docker inspect --format='{{.State.Status}}' hh-assistant)
+          echo "Container status: ${STATUS}"
+          [ "${STATUS}" = "running" ] || (docker logs --tail=50 hh-assistant && exit 1)
