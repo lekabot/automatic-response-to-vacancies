@@ -75,7 +75,7 @@ class HHClient:
         self._client = httpx.AsyncClient(
             headers={
                 "User-Agent": user_agent,
-                "Accept": "application/json, text/html, */*",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "ru-RU,ru;q=0.9",
             },
             follow_redirects=True,
@@ -122,26 +122,26 @@ class HHClient:
         if not email or not password:
             log.warning("hh.login.skipped", reason="empty_credentials")
             return False
+        _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
         try:
-            resp = await self._get(f"{WEB_BASE}/account/login")
+            resp = await self._get(_login_url)
             xsrf = self._xsrf() or self._extract_xsrf(resp.text)
             if not xsrf:
                 log.error("hh.login.no_xsrf")
                 return False
 
             login_resp = await self._client.post(
-                f"{WEB_BASE}/account/login",
+                _login_url,
                 data={
-                    "backurl": "/",
-                    "username": email,
+                    "backUrl": "/",
+                    "login": email,
                     "password": password,
                     "_xsrf": xsrf,
                     "remember": "yes",
-                    "action": "login",
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": f"{WEB_BASE}/account/login",
+                    "Referer": _login_url,
                     "X-XSRFToken": xsrf,
                 },
                 follow_redirects=True,
@@ -155,7 +155,7 @@ class HHClient:
             return self._logged_in
 
         except Exception as exc:
-            log.exception("hh.login.error", error=str(exc))
+            log.error("hh.login.error", error=str(exc), exc_info=exc)
             return False
 
     # ------------------------------------------------------------------
@@ -283,5 +283,5 @@ class HHClient:
             return ok
 
         except Exception as exc:
-            log.exception("hh.apply.error", vacancy_id=vacancy_id, error=str(exc))
+            log.error("hh.apply.error", vacancy_id=vacancy_id, error=str(exc), exc_info=exc)
             return False
