@@ -180,12 +180,15 @@ class HHClient:
                     "xsrf": xsrf,
                     "redirect_url": otp_data.get("redirectURL") or _login_url,
                 }
-            elif key in ("CODE_SEND_OK", "OTP_SEND_OK"):
+            elif key in ("CODE_SEND_OK", "OTP_SEND_OK", "CODE_SEND_BLOCKED"):
+                # CODE_SEND_BLOCKED — код уже отправлен ранее и ещё действует
+                already_sent = key == "CODE_SEND_BLOCKED"
                 return {
                     "method": "otp",
                     "cookies": cookies,
                     "xsrf": xsrf,
-                    "notification_type": otp_data.get("notificationType", "EMAIL"),
+                    "notification_type": otp_data.get("notificationType") or "EMAIL",
+                    "already_sent": already_sent,
                 }
             else:
                 log.error("hh.login.unknown_key", key=key, data=otp_data)

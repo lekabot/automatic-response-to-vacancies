@@ -262,7 +262,15 @@ async def setup_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["login_info"] = login_info
 
     if login_info["method"] == "otp":
-        await wait.edit_text(_PROMPT_OTP, parse_mode=ParseMode.HTML)
+        if login_info.get("already_sent"):
+            otp_msg = (
+                "📧 <b>Код уже отправлен</b>\n\n"
+                "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
+                "Введите его ниже:"
+            )
+        else:
+            otp_msg = _PROMPT_OTP
+        await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
         return SETUP_OTP
 
     # PASSWORD_REQUIRED — спрашиваем пароль
@@ -470,7 +478,15 @@ async def edit_credentials_email(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["login_info"] = login_info
 
     if login_info["method"] == "otp":
-        await wait.edit_text(_PROMPT_OTP, parse_mode=ParseMode.HTML)
+        if login_info.get("already_sent"):
+            otp_msg = (
+                "📧 <b>Код уже отправлен</b>\n\n"
+                "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
+                "Введите его ниже:"
+            )
+        else:
+            otp_msg = _PROMPT_OTP
+        await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
         return EDIT_OTP
 
     context.user_data["editing_credentials"] = "password"
