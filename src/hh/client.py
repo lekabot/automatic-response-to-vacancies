@@ -105,8 +105,18 @@ class HHClient:
         resp.raise_for_status()
         return resp
 
+    def _cookie(self, name: str) -> str | None:
+        """Возвращает значение куки, игнорируя CookieConflict (дубли по доменам)."""
+        try:
+            return self._client.cookies.get(name)
+        except Exception:
+            for cookie in self._client.cookies.jar:
+                if cookie.name == name:
+                    return cookie.value
+            return None
+
     def _xsrf(self) -> str | None:
-        return self._client.cookies.get("_xsrf")
+        return self._cookie("_xsrf")
 
     def _extract_xsrf(self, html: str) -> str | None:
         """Извлекает XSRF из HTML-input (старый формат) или из page-JSON (React SPA)."""
@@ -205,7 +215,7 @@ class HHClient:
 
     def get_hhtoken(self) -> str | None:
         """Возвращает значение hhtoken cookie после успешного входа."""
-        return self._client.cookies.get("hhtoken")
+        return self._cookie("hhtoken")
 
     async def complete_otp_login(self, email: str, code: str) -> bool:
         """
@@ -236,7 +246,7 @@ class HHClient:
                 },
                 follow_redirects=True,
             )
-            self._logged_in = bool(self._client.cookies.get("hhtoken"))
+            self._logged_in = bool(self._cookie("hhtoken"))
             log.info(
                 "hh.login.otp_complete",
                 status=resp.status_code,
@@ -280,7 +290,7 @@ class HHClient:
                 )
                 return False
 
-            self._logged_in = bool(self._client.cookies.get("hhtoken")) or (
+            self._logged_in = bool(self._cookie("hhtoken")) or (
                 "/account/login" not in str(login_resp.url)
             )
             log.info("hh.login.result", success=self._logged_in)
