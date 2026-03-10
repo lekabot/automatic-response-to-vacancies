@@ -120,12 +120,16 @@ class HHClient:
 
     async def login(self, email: str, password: str) -> bool:
         """
-        Авторизация через web-сессию hh.ru.
+        Авторизация через web-сессию hh.ru (актуальный flow из JS-источников).
 
-        1. GET hh.ru — устанавливаем сессионные куки (hhuid, _xsrf и др.).
-        2. GET /account/login — получаем XSRF из page-JSON или cookie.
-        3. POST /account/login — отправляем email + password.
-        4. Проверяем cookie hhtoken или итоговый URL.
+        1. GET hh.ru/ — устанавливаем сессионные куки (hhuid, _xsrf и др.).
+        2. GET /account/login — получаем XSRF.
+        3. POST /account/otp_generate — инициируем авторизацию.
+           Сервер вернёт JSON:
+             {"key": "PASSWORD_REQUIRED", "redirectURL": "..."} — нужен пароль
+             {"otp": {...}}                                      — нужен OTP-код
+        4. Если PASSWORD_REQUIRED → GET redirectURL → POST пароль.
+        5. Проверяем cookie hhtoken.
         """
         if not email or not password:
             log.warning("hh.login.skipped", reason="empty_credentials")
@@ -134,24 +138,66 @@ class HHClient:
         _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
 
         try:
-            # Устанавливаем сессионные куки — hh.ru требует hhuid до логина
+            # Устанавливаем сессионные куки
             await self._rate.acquire()
             await self._client.get(f"{WEB_BASE}/", follow_redirects=True)
 
             # Получаем XSRF
             resp = await self._get(_login_url)
             xsrf = self._xsrf() or self._extract_xsrf(resp.text)
-            log.info(
-                "hh.login.xsrf",
-                xsrf_found=bool(xsrf),
-                cookies=list(self._client.cookies.keys()),
-            )
             if not xsrf:
                 log.error("hh.login.no_xsrf")
                 return False
 
+            # POST /account/otp_generate — шаг 1 нового flow hh.ru
+            otp_resp = await self._client.post(
+                f"{WEB_BASE}/account/otp_generate",
+                data={
+                    "login": email,
+                    "backurl": "/",
+                    "operationType": "applicant_otp_auth",
+                    "role": "applicant",
+                    "formatPhone": "true",
+                    "_xsrf": xsrf,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": _login_url,
+                    "X-XSRFToken": xsrf,
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                follow_redirects=True,
+            )
+            xsrf = self._xsrf() or xsrf  # обновляем XSRF
+
+            try:
+                otp_data = otp_resp.json()
+            except Exception:
+                otp_data = {}
+
+            log.info("hh.login.otp_generate", status=otp_resp.status_code, data=otp_data)
+
+            key = otp_data.get("key")
+            if key != "PASSWORD_REQUIRED":
+                # OTP отправлен на почту/телефон — нельзя автоматизировать
+                log.error(
+                    "hh.login.otp_required",
+                    key=key,
+                    hint="account requires OTP code, password login unavailable",
+                )
+                return False
+
+            # Шаг 2: переходим на страницу ввода пароля
+            redirect_url = otp_data.get("redirectURL") or _login_url
+            log.info("hh.login.password_step", redirect_url=redirect_url)
+
+            await self._client.get(redirect_url, follow_redirects=True)
+            xsrf = self._xsrf() or xsrf
+
+            # Шаг 3: отправляем пароль
             login_resp = await self._client.post(
-                _login_url,
+                redirect_url,
                 data={
                     "login": email,
                     "password": password,
@@ -161,7 +207,7 @@ class HHClient:
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": _login_url,
+                    "Referer": redirect_url,
                     "X-XSRFToken": xsrf,
                 },
                 follow_redirects=True,
