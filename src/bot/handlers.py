@@ -8,8 +8,8 @@ Telegram bot handlers.
          → кнопка «⏹ Остановить»
 
 States:
-  SETUP_KEYWORDS / SETUP_COVER_LETTER / SETUP_EMAIL / SETUP_PASSWORD /
-  SETUP_OTP / SELECT_RESUME / MAIN_MENU / EDIT_KEYWORDS / EDIT_COVER_LETTER /
+  SETUP_KEYWORDS / SETUP_COVER_LETTER / SETUP_EMAIL / SETUP_OTP /
+  SELECT_RESUME / MAIN_MENU / EDIT_KEYWORDS / EDIT_COVER_LETTER /
   EDIT_CREDENTIALS / EDIT_OTP / SEARCHING
 """
 from __future__ import annotations
@@ -48,7 +48,6 @@ log = structlog.get_logger(__name__)
     SETUP_KEYWORDS,
     SETUP_COVER_LETTER,
     SETUP_EMAIL,
-    SETUP_PASSWORD,
     SETUP_OTP,
     SELECT_RESUME,
     MAIN_MENU,
@@ -57,7 +56,7 @@ log = structlog.get_logger(__name__)
     EDIT_CREDENTIALS,
     EDIT_OTP,
     SEARCHING,
-) = range(12)
+) = range(11)
 
 # ---------------------------------------------------------------------------
 # Prompt texts
@@ -84,11 +83,6 @@ _PROMPT_LETTER = (
 _PROMPT_EMAIL = (
     "🔑 <b>Шаг 3 из 3 — Аккаунт hh.ru</b>\n\n"
     "Введите email от вашего аккаунта соискателя на hh.ru:"
-)
-
-_PROMPT_PASSWORD = (
-    "🔒 Теперь введите пароль от аккаунта hh.ru:\n\n"
-    "<i>Данные хранятся только на вашем сервере и не передаются третьим лицам.</i>"
 )
 
 _PROMPT_OTP = (
@@ -133,28 +127,11 @@ async def _do_initiate_login(email: str) -> dict:
 async def _complete_otp_and_resumes(
     email: str, code: str, login_info: dict
 ) -> tuple[bool, str | None, list[dict]]:
-    """OTP-ветка: проверяет код и возвращает (ok, hhtoken, resumes)."""
+    """Проверяет OTP-код и возвращает (ok, hhtoken, resumes)."""
     config = get_config()
     async with HHClient(user_agent=config.hh.user_agent) as hh:
         hh.restore_cookies(login_info.get("cookies", {}))
         ok = await hh.complete_otp_login(email, code)
-        if not ok:
-            return False, None, []
-        hhtoken = hh.get_hhtoken()
-        resumes = await hh.get_resumes()
-    return True, hhtoken, resumes
-
-
-async def _complete_password_and_resumes(
-    email: str, password: str, login_info: dict
-) -> tuple[bool, str | None, list[dict]]:
-    """Password-ветка: логинится паролем и возвращает (ok, hhtoken, resumes)."""
-    config = get_config()
-    async with HHClient(user_agent=config.hh.user_agent) as hh:
-        hh.restore_cookies(login_info.get("cookies", {}))
-        ok = await hh.complete_password_login(
-            email, password, login_info.get("redirect_url", "")
-        )
         if not ok:
             return False, None, []
         hhtoken = hh.get_hhtoken()
@@ -261,21 +238,13 @@ async def setup_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["pending_email"] = email
     context.user_data["login_info"] = login_info
 
-    if login_info["method"] == "otp":
-        if login_info.get("already_sent"):
-            otp_msg = (
-                "📧 <b>Код уже отправлен</b>\n\n"
-                "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
-                "Введите его ниже:"
-            )
-        else:
-            otp_msg = _PROMPT_OTP
-        await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
-        return SETUP_OTP
-
-    # PASSWORD_REQUIRED — спрашиваем пароль
-    await wait.edit_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
-    return SETUP_PASSWORD
+    otp_msg = (
+        "📧 <b>Код уже отправлен</b>\n\n"
+        "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
+        "Введите его ниже:"
+    ) if login_info.get("already_sent") else _PROMPT_OTP
+    await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
+    return SETUP_OTP
 
 
 async def setup_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -301,33 +270,6 @@ async def setup_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await db.save_user_settings(chat_id, hh_email=email, hh_password=None, hhtoken=hhtoken)
     return await _finish_auth(update, context, chat_id, resumes, wait)
 
-
-async def setup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Шаг ввода пароля при настройке (только для аккаунтов с паролем)."""
-    chat_id = update.effective_chat.id
-    email = context.user_data.get("pending_email", "")
-    login_info = context.user_data.get("login_info", {})
-    password = update.message.text.strip()
-
-    wait = await update.message.reply_text("⏳ Проверяю данные...")
-    ok, hhtoken, resumes = await _complete_password_and_resumes(email, password, login_info)
-
-    if not ok:
-        await wait.edit_text(
-            "❌ Не удалось войти. Проверьте email и пароль.\n\n" + _PROMPT_EMAIL,
-            parse_mode=ParseMode.HTML,
-        )
-        context.user_data.pop("login_info", None)
-        return SETUP_EMAIL
-
-    if not resumes:
-        await wait.edit_text("❌ Нет резюме на аккаунте. Создайте резюме на hh.ru и попробуйте снова.")
-        return SETUP_EMAIL
-
-    context.user_data.pop("pending_email", None)
-    context.user_data.pop("login_info", None)
-    await db.save_user_settings(chat_id, hh_email=email, hh_password=password, hhtoken=hhtoken)
-    return await _finish_auth(update, context, chat_id, resumes, wait)
 
 
 async def _finish_auth(update, context, chat_id: int, resumes: list[dict], wait_msg) -> int:
@@ -477,52 +419,13 @@ async def edit_credentials_email(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["pending_email"] = email
     context.user_data["login_info"] = login_info
 
-    if login_info["method"] == "otp":
-        if login_info.get("already_sent"):
-            otp_msg = (
-                "📧 <b>Код уже отправлен</b>\n\n"
-                "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
-                "Введите его ниже:"
-            )
-        else:
-            otp_msg = _PROMPT_OTP
-        await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
-        return EDIT_OTP
-
-    context.user_data["editing_credentials"] = "password"
-    await wait.edit_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
-    return EDIT_CREDENTIALS
-
-
-async def edit_credentials_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Второй шаг редактирования — пароль (только для аккаунтов с паролем)."""
-    chat_id = update.effective_chat.id
-    email = context.user_data.pop("pending_email", "")
-    login_info = context.user_data.pop("login_info", {})
-    password = update.message.text.strip()
-    context.user_data.pop("editing_credentials", None)
-
-    wait = await update.message.reply_text("⏳ Проверяю данные...")
-    ok, hhtoken, resumes = await _complete_password_and_resumes(email, password, login_info)
-
-    if not ok:
-        await wait.edit_text(
-            "❌ Неверный email или пароль. Попробуйте снова:\n\n" + _PROMPT_EMAIL,
-            parse_mode=ParseMode.HTML,
-        )
-        return EDIT_CREDENTIALS
-
-    await db.save_user_settings(chat_id, hh_email=email, hh_password=password, hhtoken=hhtoken)
-    if resumes:
-        r = resumes[0]
-        await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
-
-    settings = await db.get_user_settings(chat_id)
-    await wait.edit_text("✅ Учётные данные обновлены.")
-    await update.message.reply_text(
-        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
-    )
-    return MAIN_MENU
+    otp_msg = (
+        "📧 <b>Код уже отправлен</b>\n\n"
+        "На ваш email уже был отправлен 4-значный код — проверьте входящие (и папку «Спам»).\n"
+        "Введите его ниже:"
+    ) if login_info.get("already_sent") else _PROMPT_OTP
+    await wait.edit_text(otp_msg, parse_mode=ParseMode.HTML)
+    return EDIT_OTP
 
 
 async def edit_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -556,13 +459,6 @@ async def edit_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return MAIN_MENU
 
-
-def _edit_credentials_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Роутер: ждём email → потом пароль (если нужен)."""
-    stage = context.user_data.get("editing_credentials")
-    if stage == "password":
-        return edit_credentials_password(update, context)
-    return edit_credentials_email(update, context)
 
 
 # ---------------------------------------------------------------------------
@@ -661,25 +557,26 @@ async def _search_task(
     for job in job_queue.get_jobs_by_name(f"hourly_{chat_id}"):
         job.schedule_removal()
 
+    # Если пользователь остановил вручную — stop_search уже показал итог
+    if cancel_event.is_set():
+        return
+
     stats = await db.get_today_stats()
     text = format_final_summary(
         stats, daily_limit=daily_limit, stopped_by_limit=result["stopped_by_limit"]
     )
 
-    if not cancel_event.is_set():
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=status_msg_id, text=text,
-                parse_mode=ParseMode.HTML, reply_markup=back_keyboard(),
-                disable_web_page_preview=True,
-            )
-            return
-        except Exception:
-            pass
-    await bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
-        reply_markup=back_keyboard(), disable_web_page_preview=True,
-    )
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg_id, text=text,
+            parse_mode=ParseMode.HTML, reply_markup=back_keyboard(),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard(), disable_web_page_preview=True,
+        )
 
 
 async def stop_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -734,7 +631,6 @@ def register_handlers(app: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, setup_letter_text),
             ],
             SETUP_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_email)],
-            SETUP_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_password)],
             SETUP_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_otp)],
             SELECT_RESUME: [CallbackQueryHandler(select_resume, pattern=r"^resume:")],
             MAIN_MENU: [
@@ -749,7 +645,7 @@ def register_handlers(app: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_letter_text),
             ],
             EDIT_CREDENTIALS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _edit_credentials_handler)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_credentials_email)
             ],
             EDIT_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_otp)],
             SEARCHING: [

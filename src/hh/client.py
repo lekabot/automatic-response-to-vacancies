@@ -257,64 +257,6 @@ class HHClient:
             log.error("hh.login.otp_complete_error", error=str(exc), exc_info=exc)
             return False
 
-    async def complete_password_login(
-        self, email: str, password: str, redirect_url: str
-    ) -> bool:
-        """Шаг 2 для аккаунтов с паролем."""
-        xsrf = self._xsrf()
-        try:
-            await self._client.get(redirect_url, follow_redirects=True)
-            xsrf = self._xsrf() or xsrf
-
-            login_resp = await self._client.post(
-                redirect_url,
-                data={
-                    "login": email,
-                    "password": password,
-                    "_xsrf": xsrf or "",
-                    "backUrl": "/",
-                    "remember": "yes",
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": redirect_url,
-                    "X-XSRFToken": xsrf or "",
-                },
-                follow_redirects=True,
-            )
-            if login_resp.status_code >= 400:
-                log.error(
-                    "hh.login.bad_response",
-                    status=login_resp.status_code,
-                    body=login_resp.text[:300],
-                )
-                return False
-
-            self._logged_in = bool(self._cookie("hhtoken")) or (
-                "/account/login" not in str(login_resp.url)
-            )
-            log.info("hh.login.result", success=self._logged_in)
-            return self._logged_in
-        except Exception as exc:
-            log.error("hh.login.password_error", error=str(exc), exc_info=exc)
-            return False
-
-    async def login(self, email: str, password: str) -> bool:
-        """Авторизация через пароль (для pipeline-сценария)."""
-        if self._logged_in:
-            return True
-        if not email or not password:
-            log.warning("hh.login.skipped", reason="empty_credentials")
-            return False
-        info = await self.initiate_login(email)
-        if info["method"] == "error":
-            return False
-        if info["method"] == "otp":
-            log.error("hh.login.otp_required", hint="use complete_otp_login in bot flow")
-            return False
-        return await self.complete_password_login(
-            email, password, info["redirect_url"]
-        )
 
     # ------------------------------------------------------------------
     # Resumes (parse HTML /applicant/resumes)
@@ -335,11 +277,17 @@ class HHClient:
         seen: set[str] = set()
         for link in soup.find_all("a", href=True):
             href = str(link["href"])
-            if "/resume/" in href and "edit" not in href:
-                rid = href.rstrip("/").split("/")[-1]
-                if rid not in seen and len(rid) > 4:
-                    seen.add(rid)
-                    resumes.append({"id": rid, "title": link.get_text(strip=True) or "Резюме"})
+            if "/resume/" not in href or "edit" in href:
+                continue
+            # Отрезаем query string, чтобы resume_id был чистым
+            clean_href = href.split("?")[0]
+            rid = clean_href.rstrip("/").split("/")[-1]
+            if rid not in seen and len(rid) > 4:
+                seen.add(rid)
+                # Берём первую непустую текстовую строку внутри тега (не кнопки/вложенные элементы)
+                strings = [s.strip() for s in link.strings if s.strip()]
+                title = strings[0] if strings else "Резюме"
+                resumes.append({"id": rid, "title": title})
         return resumes
 
     # ------------------------------------------------------------------
@@ -407,11 +355,15 @@ class HHClient:
         """
         Откликнуться на вакансию через web-сессию.
 
-        Требует предварительного вызова login().
+        Требует предварительного вызова login() или передачи hhtoken в конструктор.
         """
         if not self._logged_in:
             log.error("hh.apply.not_logged_in", vacancy_id=vacancy_id)
             return False
+
+        # Защита от resume_id с query string (из-за старых данных в БД)
+        clean_resume_id = resume_id.split("?")[0]
+
         try:
             # Обновляем XSRF-токен, открыв страницу вакансии
             await self._get(f"{WEB_BASE}/vacancy/{vacancy_id}")
@@ -424,7 +376,7 @@ class HHClient:
                 f"{WEB_BASE}/applicant/vacancy_response",
                 data={
                     "vacancy_id": vacancy_id,
-                    "resume_id": resume_id,
+                    "resume_id": clean_resume_id,
                     "letter": letter,
                     "_xsrf": xsrf,
                     "ignore_postponed": "1",
@@ -437,6 +389,13 @@ class HHClient:
                 },
             )
             ok = resp.status_code in (200, 302, 303)
+            if not ok:
+                log.warning(
+                    "hh.apply.failed",
+                    vacancy_id=vacancy_id,
+                    status=resp.status_code,
+                    body=resp.text[:400],
+                )
             log.info("hh.apply.result", vacancy_id=vacancy_id, status=resp.status_code, ok=ok)
             return ok
 

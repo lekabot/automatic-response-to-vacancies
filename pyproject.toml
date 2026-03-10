@@ -41,6 +41,9 @@ include = ["src*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: real HTTP calls to hh.ru (skipped in CI unless HH_TOKEN is set)",
+]
 
 [tool.ruff]
 line-length = 100
