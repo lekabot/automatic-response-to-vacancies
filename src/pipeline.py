@@ -31,7 +31,8 @@ async def run_user_pipeline(
     *,
     chat_id: int,
     hh_email: str,
-    hh_password: str,
+    hh_password: str | None,
+    hhtoken: str | None = None,
     resume_id: str,
     keywords: list[str],
     cover_letter: str,
@@ -43,7 +44,8 @@ async def run_user_pipeline(
     Args:
         chat_id: Telegram chat ID.
         hh_email: Email от аккаунта hh.ru.
-        hh_password: Пароль от аккаунта hh.ru.
+        hh_password: Пароль (None для OTP-аккаунтов).
+        hhtoken: Сессионный токен (используется вместо пароля для OTP-аккаунтов).
         resume_id: ID резюме для откликов.
         keywords: Ключевые слова для поиска.
         cover_letter: Шаблон письма (пустая строка — без письма).
@@ -56,8 +58,12 @@ async def run_user_pipeline(
         user_agent=config.hh.user_agent,
         qps=config.hh.rate_limit.qps,
         burst=config.hh.rate_limit.burst,
+        hhtoken=hhtoken,
     ) as hh:
-        logged_in = await hh.login(hh_email, hh_password)
+        if hhtoken:
+            logged_in = True
+        else:
+            logged_in = await hh.login(hh_email, hh_password or "")
         if not logged_in:
             log.error("pipeline.login_failed", chat_id=chat_id)
             return result

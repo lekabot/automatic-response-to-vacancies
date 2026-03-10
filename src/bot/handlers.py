@@ -9,8 +9,8 @@ Telegram bot handlers.
 
 States:
   SETUP_KEYWORDS / SETUP_COVER_LETTER / SETUP_EMAIL / SETUP_PASSWORD /
-  SELECT_RESUME / MAIN_MENU / EDIT_KEYWORDS / EDIT_COVER_LETTER /
-  EDIT_CREDENTIALS / SEARCHING
+  SETUP_OTP / SELECT_RESUME / MAIN_MENU / EDIT_KEYWORDS / EDIT_COVER_LETTER /
+  EDIT_CREDENTIALS / EDIT_OTP / SEARCHING
 """
 from __future__ import annotations
 
@@ -49,13 +49,15 @@ log = structlog.get_logger(__name__)
     SETUP_COVER_LETTER,
     SETUP_EMAIL,
     SETUP_PASSWORD,
+    SETUP_OTP,
     SELECT_RESUME,
     MAIN_MENU,
     EDIT_KEYWORDS,
     EDIT_COVER_LETTER,
     EDIT_CREDENTIALS,
+    EDIT_OTP,
     SEARCHING,
-) = range(10)
+) = range(12)
 
 # ---------------------------------------------------------------------------
 # Prompt texts
@@ -89,6 +91,12 @@ _PROMPT_PASSWORD = (
     "<i>Данные хранятся только на вашем сервере и не передаются третьим лицам.</i>"
 )
 
+_PROMPT_OTP = (
+    "📧 <b>Код подтверждения</b>\n\n"
+    "На ваш email отправлен 4-значный код.\n"
+    "Введите его ниже:"
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -115,14 +123,50 @@ def _esc(t: str) -> str:
     return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-async def _login_and_get_resumes(email: str, password: str) -> tuple[bool, list[dict]]:
+async def _do_initiate_login(email: str) -> dict:
+    """Запускает шаг 1 авторизации hh.ru; возвращает dict с method + cookies."""
     config = get_config()
     async with HHClient(user_agent=config.hh.user_agent) as hh:
-        ok = await hh.login(email, password)
+        return await hh.initiate_login(email)
+
+
+async def _complete_otp_and_resumes(
+    email: str, code: str, login_info: dict
+) -> tuple[bool, str | None, list[dict]]:
+    """OTP-ветка: проверяет код и возвращает (ok, hhtoken, resumes)."""
+    config = get_config()
+    async with HHClient(user_agent=config.hh.user_agent) as hh:
+        hh.restore_cookies(login_info.get("cookies", {}))
+        ok = await hh.complete_otp_login(email, code)
         if not ok:
-            return False, []
+            return False, None, []
+        hhtoken = hh.get_hhtoken()
         resumes = await hh.get_resumes()
-    return True, resumes
+    return True, hhtoken, resumes
+
+
+async def _complete_password_and_resumes(
+    email: str, password: str, login_info: dict
+) -> tuple[bool, str | None, list[dict]]:
+    """Password-ветка: логинится паролем и возвращает (ok, hhtoken, resumes)."""
+    config = get_config()
+    async with HHClient(user_agent=config.hh.user_agent) as hh:
+        hh.restore_cookies(login_info.get("cookies", {}))
+        ok = await hh.complete_password_login(
+            email, password, login_info.get("redirect_url", "")
+        )
+        if not ok:
+            return False, None, []
+        hhtoken = hh.get_hhtoken()
+        resumes = await hh.get_resumes()
+    return True, hhtoken, resumes
+
+
+async def _resumes_with_hhtoken(hhtoken: str) -> list[dict]:
+    """Получает список резюме по сохранённому hhtoken."""
+    config = get_config()
+    async with HHClient(user_agent=config.hh.user_agent, hhtoken=hhtoken) as hh:
+        return await hh.get_resumes()
 
 
 # ---------------------------------------------------------------------------
@@ -204,37 +248,87 @@ async def setup_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("⚠️ Похоже, это не email. Введите корректный адрес.")
         return SETUP_EMAIL
 
+    wait = await update.message.reply_text("⏳ Проверяю аккаунт...")
+    login_info = await _do_initiate_login(email)
+
+    if login_info["method"] == "error":
+        await wait.edit_text(
+            f"❌ Ошибка: {login_info['message']}\n\n" + _PROMPT_EMAIL,
+            parse_mode=ParseMode.HTML,
+        )
+        return SETUP_EMAIL
+
     context.user_data["pending_email"] = email
-    await update.message.reply_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
+    context.user_data["login_info"] = login_info
+
+    if login_info["method"] == "otp":
+        await wait.edit_text(_PROMPT_OTP, parse_mode=ParseMode.HTML)
+        return SETUP_OTP
+
+    # PASSWORD_REQUIRED — спрашиваем пароль
+    await wait.edit_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
     return SETUP_PASSWORD
 
 
-async def setup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def setup_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Шаг ввода OTP-кода при настройке."""
     chat_id = update.effective_chat.id
-    email = context.user_data.pop("pending_email", "")
+    email = context.user_data.get("pending_email", "")
+    login_info = context.user_data.get("login_info", {})
+    code = update.message.text.strip()
+
+    wait = await update.message.reply_text("⏳ Проверяю код...")
+    ok, hhtoken, resumes = await _complete_otp_and_resumes(email, code, login_info)
+
+    if not ok:
+        await wait.edit_text("❌ Неверный код. Попробуйте снова или введите /start для перезапуска.\n\n" + _PROMPT_OTP, parse_mode=ParseMode.HTML)
+        return SETUP_OTP
+
+    if not resumes:
+        await wait.edit_text("❌ Нет резюме на аккаунте. Создайте резюме на hh.ru и введите /start.")
+        return SETUP_EMAIL
+
+    context.user_data.pop("pending_email", None)
+    context.user_data.pop("login_info", None)
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=None, hhtoken=hhtoken)
+    return await _finish_auth(update, context, chat_id, resumes, wait)
+
+
+async def setup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Шаг ввода пароля при настройке (только для аккаунтов с паролем)."""
+    chat_id = update.effective_chat.id
+    email = context.user_data.get("pending_email", "")
+    login_info = context.user_data.get("login_info", {})
     password = update.message.text.strip()
 
     wait = await update.message.reply_text("⏳ Проверяю данные...")
-    ok, resumes = await _login_and_get_resumes(email, password)
+    ok, hhtoken, resumes = await _complete_password_and_resumes(email, password, login_info)
 
     if not ok:
         await wait.edit_text(
             "❌ Не удалось войти. Проверьте email и пароль.\n\n" + _PROMPT_EMAIL,
             parse_mode=ParseMode.HTML,
         )
+        context.user_data.pop("login_info", None)
         return SETUP_EMAIL
 
     if not resumes:
         await wait.edit_text("❌ Нет резюме на аккаунте. Создайте резюме на hh.ru и попробуйте снова.")
         return SETUP_EMAIL
 
-    await db.save_user_settings(chat_id, hh_email=email, hh_password=password)
+    context.user_data.pop("pending_email", None)
+    context.user_data.pop("login_info", None)
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=password, hhtoken=hhtoken)
+    return await _finish_auth(update, context, chat_id, resumes, wait)
 
+
+async def _finish_auth(update, context, chat_id: int, resumes: list[dict], wait_msg) -> int:
+    """Общий финал после успешной аутентификации: сохранить резюме и перейти в меню."""
     if len(resumes) == 1:
         r = resumes[0]
         await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
         settings = await db.get_user_settings(chat_id)
-        await wait.edit_text(
+        await wait_msg.edit_text(
             f"✅ Вход выполнен · Резюме: <b>{_esc(r.get('title', ''))}</b>",
             parse_mode=ParseMode.HTML,
         )
@@ -243,7 +337,7 @@ async def setup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return MAIN_MENU
 
-    await wait.edit_text(
+    await wait_msg.edit_text(
         f"✅ Вход выполнен · Найдено {len(resumes)} резюме. Выберите одно:",
         parse_mode=ParseMode.HTML,
         reply_markup=resume_keyboard(resumes),
@@ -264,14 +358,14 @@ async def select_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     settings_now = await db.get_user_settings(chat_id)
     resume_title = resume_id
-    if settings_now and settings_now.hh_email and settings_now.hh_password:
-        config = get_config()
-        async with HHClient(user_agent=config.hh.user_agent) as hh:
-            if await hh.login(settings_now.hh_email, settings_now.hh_password):
-                for r in await hh.get_resumes():
-                    if r.get("id") == resume_id:
-                        resume_title = r.get("title", resume_id)
-                        break
+    if settings_now and settings_now.hhtoken:
+        try:
+            for r in await _resumes_with_hhtoken(settings_now.hhtoken):
+                if r.get("id") == resume_id:
+                    resume_title = r.get("title", resume_id)
+                    break
+        except Exception:
+            pass
 
     await db.save_user_settings(chat_id, resume_id=resume_id, resume_title=resume_title)
     settings = await db.get_user_settings(chat_id)
@@ -356,35 +450,85 @@ async def edit_letter_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def edit_credentials_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Первый шаг редактирования учётных данных — email."""
+    """Первый шаг редактирования — email: инициируем авторизацию."""
     email = update.message.text.strip()
     if "@" not in email:
         await update.message.reply_text("⚠️ Введите корректный email.")
         return EDIT_CREDENTIALS
+
+    wait = await update.message.reply_text("⏳ Проверяю аккаунт...")
+    login_info = await _do_initiate_login(email)
+
+    if login_info["method"] == "error":
+        await wait.edit_text(
+            f"❌ Ошибка: {login_info['message']}\n\nВведите email снова:",
+            parse_mode=ParseMode.HTML,
+        )
+        return EDIT_CREDENTIALS
+
     context.user_data["pending_email"] = email
-    await update.message.reply_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
-    # Сигнализируем о переходе к шагу пароля через флаг
+    context.user_data["login_info"] = login_info
+
+    if login_info["method"] == "otp":
+        await wait.edit_text(_PROMPT_OTP, parse_mode=ParseMode.HTML)
+        return EDIT_OTP
+
     context.user_data["editing_credentials"] = "password"
+    await wait.edit_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
     return EDIT_CREDENTIALS
 
 
 async def edit_credentials_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Второй шаг редактирования — пароль, верификация."""
+    """Второй шаг редактирования — пароль (только для аккаунтов с паролем)."""
     chat_id = update.effective_chat.id
     email = context.user_data.pop("pending_email", "")
+    login_info = context.user_data.pop("login_info", {})
     password = update.message.text.strip()
     context.user_data.pop("editing_credentials", None)
 
     wait = await update.message.reply_text("⏳ Проверяю данные...")
-    ok, resumes = await _login_and_get_resumes(email, password)
+    ok, hhtoken, resumes = await _complete_password_and_resumes(email, password, login_info)
 
     if not ok:
-        await wait.edit_text("❌ Неверный email или пароль. Попробуйте снова:\n\n" + _PROMPT_EMAIL,
-                             parse_mode=ParseMode.HTML)
+        await wait.edit_text(
+            "❌ Неверный email или пароль. Попробуйте снова:\n\n" + _PROMPT_EMAIL,
+            parse_mode=ParseMode.HTML,
+        )
         return EDIT_CREDENTIALS
 
-    await db.save_user_settings(chat_id, hh_email=email, hh_password=password)
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=password, hhtoken=hhtoken)
+    if resumes:
+        r = resumes[0]
+        await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
 
+    settings = await db.get_user_settings(chat_id)
+    await wait.edit_text("✅ Учётные данные обновлены.")
+    await update.message.reply_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+async def edit_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Шаг ввода OTP-кода при редактировании учётных данных."""
+    chat_id = update.effective_chat.id
+    email = context.user_data.get("pending_email", "")
+    login_info = context.user_data.get("login_info", {})
+    code = update.message.text.strip()
+
+    wait = await update.message.reply_text("⏳ Проверяю код...")
+    ok, hhtoken, resumes = await _complete_otp_and_resumes(email, code, login_info)
+
+    if not ok:
+        await wait.edit_text(
+            "❌ Неверный код. Попробуйте снова:\n\n" + _PROMPT_OTP,
+            parse_mode=ParseMode.HTML,
+        )
+        return EDIT_OTP
+
+    context.user_data.pop("pending_email", None)
+    context.user_data.pop("login_info", None)
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=None, hhtoken=hhtoken)
     if resumes:
         r = resumes[0]
         await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
@@ -398,7 +542,7 @@ async def edit_credentials_password(update: Update, context: ContextTypes.DEFAUL
 
 
 def _edit_credentials_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Роутер: ждём email → потом пароль."""
+    """Роутер: ждём email → потом пароль (если нужен)."""
     stage = context.user_data.get("editing_credentials")
     if stage == "password":
         return edit_credentials_password(update, context)
@@ -488,6 +632,7 @@ async def _search_task(
             chat_id=chat_id,
             hh_email=settings.hh_email,
             hh_password=settings.hh_password,
+            hhtoken=settings.hhtoken,
             resume_id=settings.resume_id,
             keywords=settings.keywords,
             cover_letter=settings.cover_letter or "",
@@ -574,6 +719,7 @@ def register_handlers(app: Application) -> None:
             ],
             SETUP_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_email)],
             SETUP_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_password)],
+            SETUP_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_otp)],
             SELECT_RESUME: [CallbackQueryHandler(select_resume, pattern=r"^resume:")],
             MAIN_MENU: [
                 CallbackQueryHandler(
@@ -589,6 +735,7 @@ def register_handlers(app: Application) -> None:
             EDIT_CREDENTIALS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, _edit_credentials_handler)
             ],
+            EDIT_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_otp)],
             SEARCHING: [
                 CallbackQueryHandler(stop_search, pattern="^stop_search$"),
                 CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"),

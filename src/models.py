@@ -48,6 +48,7 @@ class UserSettings(Base):
     cover_letter: Mapped[str | None] = mapped_column(Text, nullable=True)
     hh_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     hh_password: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hhtoken: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -66,4 +67,5 @@ class UserSettings(Base):
         self.keywords_json = json.dumps(value, ensure_ascii=False)
 
     def is_complete(self) -> bool:
-        return bool(self.keywords and self.hh_email and self.hh_password and self.resume_id)
+        has_auth = bool(self.hhtoken) or bool(self.hh_password)
+        return bool(self.keywords and self.hh_email and has_auth and self.resume_id)

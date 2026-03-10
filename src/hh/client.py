@@ -71,7 +71,9 @@ class HHClient:
             applied = await client.apply(vacancy_id="12345", resume_id="abc")
     """
 
-    def __init__(self, user_agent: str, qps: float = 2.0, burst: int = 5) -> None:
+    def __init__(
+        self, user_agent: str, qps: float = 2.0, burst: int = 5, hhtoken: str | None = None
+    ) -> None:
         self._rate = RateLimiter(qps=qps, burst=burst)
         self._client = httpx.AsyncClient(
             headers={
@@ -83,6 +85,9 @@ class HHClient:
             timeout=httpx.Timeout(30.0),
         )
         self._logged_in = False
+        if hhtoken:
+            self._client.cookies.set("hhtoken", hhtoken, domain="hh.ru")
+            self._logged_in = True
 
     async def __aenter__(self) -> "HHClient":
         return self
@@ -118,38 +123,26 @@ class HHClient:
     # Auth
     # ------------------------------------------------------------------
 
-    async def login(self, email: str, password: str) -> bool:
+    async def initiate_login(self, email: str) -> dict:
         """
-        Авторизация через web-сессию hh.ru (актуальный flow из JS-источников).
+        Шаг 1 авторизации: отправляет запрос к hh.ru и определяет метод входа.
 
-        1. GET hh.ru/ — устанавливаем сессионные куки (hhuid, _xsrf и др.).
-        2. GET /account/login — получаем XSRF.
-        3. POST /account/otp_generate — инициируем авторизацию.
-           Сервер вернёт JSON:
-             {"key": "PASSWORD_REQUIRED", "redirectURL": "..."} — нужен пароль
-             {"otp": {...}}                                      — нужен OTP-код
-        4. Если PASSWORD_REQUIRED → GET redirectURL → POST пароль.
-        5. Проверяем cookie hhtoken.
+        Возвращает один из вариантов:
+          {"method": "otp",      "cookies": {...}, "xsrf": "..."}
+          {"method": "password", "cookies": {...}, "xsrf": "...", "redirect_url": "..."}
+          {"method": "error",    "message": "..."}
         """
-        if not email or not password:
-            log.warning("hh.login.skipped", reason="empty_credentials")
-            return False
-
         _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
-
         try:
-            # Устанавливаем сессионные куки
             await self._rate.acquire()
             await self._client.get(f"{WEB_BASE}/", follow_redirects=True)
 
-            # Получаем XSRF
             resp = await self._get(_login_url)
             xsrf = self._xsrf() or self._extract_xsrf(resp.text)
             if not xsrf:
                 log.error("hh.login.no_xsrf")
-                return False
+                return {"method": "error", "message": "Не удалось получить XSRF-токен"}
 
-            # POST /account/otp_generate — шаг 1 нового flow hh.ru
             otp_resp = await self._client.post(
                 f"{WEB_BASE}/account/otp_generate",
                 data={
@@ -169,50 +162,113 @@ class HHClient:
                 },
                 follow_redirects=True,
             )
-            xsrf = self._xsrf() or xsrf  # обновляем XSRF
+            xsrf = self._xsrf() or xsrf
 
             try:
                 otp_data = otp_resp.json()
             except Exception:
                 otp_data = {}
 
-            log.info("hh.login.otp_generate", status=otp_resp.status_code, data=otp_data)
+            key = otp_data.get("key", "")
+            cookies = dict(self._client.cookies)
+            log.info("hh.login.initiate", key=key)
 
-            key = otp_data.get("key")
-            if key != "PASSWORD_REQUIRED":
-                # OTP отправлен на почту/телефон — нельзя автоматизировать
-                log.error(
-                    "hh.login.otp_required",
-                    key=key,
-                    hint="account requires OTP code, password login unavailable",
-                )
-                return False
+            if key == "PASSWORD_REQUIRED":
+                return {
+                    "method": "password",
+                    "cookies": cookies,
+                    "xsrf": xsrf,
+                    "redirect_url": otp_data.get("redirectURL") or _login_url,
+                }
+            elif key in ("CODE_SEND_OK", "OTP_SEND_OK"):
+                return {
+                    "method": "otp",
+                    "cookies": cookies,
+                    "xsrf": xsrf,
+                    "notification_type": otp_data.get("notificationType", "EMAIL"),
+                }
+            else:
+                log.error("hh.login.unknown_key", key=key, data=otp_data)
+                return {"method": "error", "message": f"Неожиданный ответ от hh.ru: key={key!r}"}
 
-            # Шаг 2: переходим на страницу ввода пароля
-            redirect_url = otp_data.get("redirectURL") or _login_url
-            log.info("hh.login.password_step", redirect_url=redirect_url)
+        except Exception as exc:
+            log.error("hh.login.initiate_error", error=str(exc), exc_info=exc)
+            return {"method": "error", "message": str(exc)}
 
+    def restore_cookies(self, cookies: dict) -> None:
+        """Восстанавливает сессионные куки (для продолжения авторизации в новом клиенте)."""
+        for name, value in cookies.items():
+            self._client.cookies.set(name, value)
+
+    def get_hhtoken(self) -> str | None:
+        """Возвращает значение hhtoken cookie после успешного входа."""
+        return self._client.cookies.get("hhtoken")
+
+    async def complete_otp_login(self, email: str, code: str) -> bool:
+        """
+        Шаг 2 для OTP-аккаунтов: проверяет 4-значный код из email/телефона.
+        Перед вызовом нужно восстановить куки через restore_cookies().
+        """
+        _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
+        xsrf = self._xsrf()
+        try:
+            resp = await self._client.post(
+                f"{WEB_BASE}/account/login/by_code",
+                data={
+                    "username": email,
+                    "code": code.strip(),
+                    "remember": "true",
+                    "accountType": "APPLICANT",
+                    "isApplicantSignup": "false",
+                    "operationType": "otp_auth",
+                    "backurl": "/",
+                    "_xsrf": xsrf or "",
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": _login_url,
+                    "X-XSRFToken": xsrf or "",
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                follow_redirects=True,
+            )
+            self._logged_in = bool(self._client.cookies.get("hhtoken"))
+            log.info(
+                "hh.login.otp_complete",
+                status=resp.status_code,
+                success=self._logged_in,
+            )
+            return self._logged_in
+        except Exception as exc:
+            log.error("hh.login.otp_complete_error", error=str(exc), exc_info=exc)
+            return False
+
+    async def complete_password_login(
+        self, email: str, password: str, redirect_url: str
+    ) -> bool:
+        """Шаг 2 для аккаунтов с паролем."""
+        xsrf = self._xsrf()
+        try:
             await self._client.get(redirect_url, follow_redirects=True)
             xsrf = self._xsrf() or xsrf
 
-            # Шаг 3: отправляем пароль
             login_resp = await self._client.post(
                 redirect_url,
                 data={
                     "login": email,
                     "password": password,
-                    "_xsrf": xsrf,
+                    "_xsrf": xsrf or "",
                     "backUrl": "/",
                     "remember": "yes",
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Referer": redirect_url,
-                    "X-XSRFToken": xsrf,
+                    "X-XSRFToken": xsrf or "",
                 },
                 follow_redirects=True,
             )
-
             if login_resp.status_code >= 400:
                 log.error(
                     "hh.login.bad_response",
@@ -224,17 +280,28 @@ class HHClient:
             self._logged_in = bool(self._client.cookies.get("hhtoken")) or (
                 "/account/login" not in str(login_resp.url)
             )
-            log.info(
-                "hh.login.result",
-                success=self._logged_in,
-                final_url=str(login_resp.url),
-                has_hhtoken=bool(self._client.cookies.get("hhtoken")),
-            )
+            log.info("hh.login.result", success=self._logged_in)
             return self._logged_in
-
         except Exception as exc:
-            log.error("hh.login.error", error=str(exc), exc_info=exc)
+            log.error("hh.login.password_error", error=str(exc), exc_info=exc)
             return False
+
+    async def login(self, email: str, password: str) -> bool:
+        """Авторизация через пароль (для pipeline-сценария)."""
+        if self._logged_in:
+            return True
+        if not email or not password:
+            log.warning("hh.login.skipped", reason="empty_credentials")
+            return False
+        info = await self.initiate_login(email)
+        if info["method"] == "error":
+            return False
+        if info["method"] == "otp":
+            log.error("hh.login.otp_required", hint="use complete_otp_login in bot flow")
+            return False
+        return await self.complete_password_login(
+            email, password, info["redirect_url"]
+        )
 
     # ------------------------------------------------------------------
     # Resumes (parse HTML /applicant/resumes)
