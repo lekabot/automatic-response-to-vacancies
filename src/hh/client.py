@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -103,6 +104,12 @@ class HHClient:
         return self._client.cookies.get("_xsrf")
 
     def _extract_xsrf(self, html: str) -> str | None:
+        """Извлекает XSRF из HTML-input (старый формат) или из page-JSON (React SPA)."""
+        # React SPA: "xsrfToken":"<hex32>"
+        m = re.search(r'"xsrfToken"\s*:\s*"([a-f0-9]{32})"', html)
+        if m:
+            return m.group(1)
+        # Legacy: <input name="_xsrf" value="...">
         soup = BeautifulSoup(html, "lxml")
         inp = soup.find("input", {"name": "_xsrf"})
         return str(inp["value"]) if inp and inp.get("value") else None
@@ -113,45 +120,68 @@ class HHClient:
 
     async def login(self, email: str, password: str) -> bool:
         """
-        Авторизация через web-сессию hh.ru.
+        Авторизация через web-сессию hh.ru (двухшаговый flow).
 
-        1. GET /account/login — получаем страницу и XSRF-токен.
-        2. POST /account/login — отправляем credentials.
-        3. Проверяем cookie hhtoken или отсутствие редиректа назад.
+        0. GET hh.ru — устанавливаем начальные куки сессии.
+        1. GET /account/login — получаем XSRF из cookie или page-JSON.
+        2. POST только email — первый шаг формы.
+        3. POST email + password — второй шаг (финальный логин).
+        4. Проверяем cookie hhtoken или final URL.
         """
         if not email or not password:
             log.warning("hh.login.skipped", reason="empty_credentials")
             return False
-        _login_url = f"{WEB_BASE}/account/login?role=applicant&backurl=%2F"
+
+        _login_url = f"{WEB_BASE}/account/login?role=applicant&backUrl=%2F"
+        _post_headers = {"Content-Type": "application/x-www-form-urlencoded", "Referer": _login_url}
+
         try:
+            # Шаг 0: установить сессионные куки
+            await self._rate.acquire()
+            await self._client.get(f"{WEB_BASE}/", follow_redirects=True)
+
+            # Шаг 1: страница логина → XSRF
             resp = await self._get(_login_url)
             xsrf = self._xsrf() or self._extract_xsrf(resp.text)
             if not xsrf:
                 log.error("hh.login.no_xsrf")
                 return False
 
+            # Шаг 2: POST только email
+            await self._client.post(
+                _login_url,
+                data={"login": email, "_xsrf": xsrf, "backUrl": "/", "remember": "yes"},
+                headers={**_post_headers, "X-XSRFToken": xsrf},
+                follow_redirects=True,
+            )
+            xsrf = self._xsrf() or xsrf  # обновляем XSRF
+
+            # Шаг 3: POST email + password
             login_resp = await self._client.post(
                 _login_url,
                 data={
-                    "backUrl": "/",
                     "login": email,
                     "password": password,
                     "_xsrf": xsrf,
+                    "backUrl": "/",
                     "remember": "yes",
                 },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": _login_url,
-                    "X-XSRFToken": xsrf,
-                },
+                headers={**_post_headers, "X-XSRFToken": xsrf},
                 follow_redirects=True,
             )
-            login_resp.raise_for_status()
+
+            if login_resp.status_code >= 400:
+                log.error(
+                    "hh.login.bad_response",
+                    status=login_resp.status_code,
+                    body=login_resp.text[:600],
+                )
+                return False
 
             self._logged_in = bool(self._client.cookies.get("hhtoken")) or (
                 "/account/login" not in str(login_resp.url)
             )
-            log.info("hh.login.result", success=self._logged_in, email=email)
+            log.info("hh.login.result", success=self._logged_in, final_url=str(login_resp.url))
             return self._logged_in
 
         except Exception as exc:
