@@ -1,115 +1,70 @@
-"""
-Тесты форматирования сообщений Telegram.
-"""
+"""Тесты форматирования сообщений."""
 from __future__ import annotations
 
-import pytest
-
-from src.bot.formatters import (
-    format_apply_result,
-    format_run_finished,
-    format_summary,
-    format_vacancy_card,
-)
-from tests.conftest import make_vacancy
+from src.bot.formatters import format_final_summary, format_hourly_summary
 
 
-class TestFormatVacancyCard:
-    def test_contains_title(self) -> None:
-        v = make_vacancy(name="Senior Python Dev")
-        card = format_vacancy_card(v)
-        assert "Senior Python Dev" in card
-
-    def test_contains_employer(self) -> None:
-        v = make_vacancy(employer="Yandex")
-        card = format_vacancy_card(v)
-        assert "Yandex" in card
-
-    def test_contains_salary(self) -> None:
-        v = make_vacancy(salary_from=200_000, salary_to=350_000)
-        card = format_vacancy_card(v)
-        assert "200" in card
-        assert "350" in card
-
-    def test_contains_area(self) -> None:
-        v = make_vacancy(area="Санкт-Петербург")
-        card = format_vacancy_card(v)
-        assert "Санкт-Петербург" in card
-
-    def test_contains_vacancy_id(self) -> None:
-        v = make_vacancy(vacancy_id="99999")
-        card = format_vacancy_card(v)
-        assert "99999" in card
-
-    def test_html_entities_escaped(self) -> None:
-        v = make_vacancy(name="<Script>Alert</Script>")
-        card = format_vacancy_card(v)
-        assert "<Script>" not in card
-        assert "&lt;Script&gt;" in card
-
-    def test_snippet_requirement_included(self) -> None:
-        v = make_vacancy(requirement="Django, DRF, PostgreSQL")
-        card = format_vacancy_card(v)
-        assert "Django" in card
-
-    def test_no_snippet(self) -> None:
-        from src.hh.schemas import VacancySchema
-
-        v = VacancySchema(
-            id="1",
-            name="Dev",
-            employer=__import__("src.hh.schemas", fromlist=["EmployerSchema"]).EmployerSchema(
-                name="Corp"
-            ),
-            alternate_url="https://hh.ru/vacancy/1",
-        )
-        card = format_vacancy_card(v)
-        assert "Dev" in card
+def _stats(applied=0, failed=0, skipped=0, requires_test=0, vacancies=None):
+    return {
+        "applied": applied,
+        "failed": failed,
+        "skipped": skipped,
+        "requires_test": requires_test,
+        "failed_vacancies": vacancies or [],
+    }
 
 
-class TestFormatSummary:
-    def test_summary_counts(self) -> None:
-        stats = {
-            "counts": {
-                "sent": 10,
-                "applied_confirmed": 5,
-                "skipped": 3,
-                "requires_test": 2,
-            },
-            "requires_test": [],
-        }
-        text = format_summary(stats)
-        assert "10" in text
+class TestFormatHourlySummary:
+    def test_shows_applied_count(self) -> None:
+        text = format_hourly_summary(_stats(applied=5), daily_limit=200)
         assert "5" in text
-        assert "3" in text
-        assert "2" in text
 
-    def test_requires_test_list(self) -> None:
-        stats = {
-            "counts": {"sent": 1, "applied_confirmed": 0, "skipped": 0, "requires_test": 1},
-            "requires_test": [
-                {"title": "QA Engineer", "employer": "Corp", "url": "https://hh.ru/v/1"}
-            ],
-        }
-        text = format_summary(stats)
-        assert "QA Engineer" in text
-        assert "Corp" in text
+    def test_shows_daily_limit(self) -> None:
+        text = format_hourly_summary(_stats(applied=100), daily_limit=200)
+        assert "200" in text
+        assert "100" in text
+
+    def test_shows_percentage(self) -> None:
+        text = format_hourly_summary(_stats(applied=50), daily_limit=200)
+        assert "25%" in text
+
+    def test_zero_applied(self) -> None:
+        text = format_hourly_summary(_stats(), daily_limit=200)
+        assert "0" in text
 
 
-class TestFormatApplyResult:
-    def test_success(self) -> None:
-        text = format_apply_result("Python Dev", "Acme", success=True)
+class TestFormatFinalSummary:
+    def test_normal_completion(self) -> None:
+        text = format_final_summary(_stats(applied=10), daily_limit=200, stopped_by_limit=False)
+        assert "10" in text
         assert "✅" in text
+
+    def test_stopped_by_limit(self) -> None:
+        text = format_final_summary(_stats(applied=200), daily_limit=200, stopped_by_limit=True)
+        assert "лимит" in text.lower()
+        assert "🛑" in text
+
+    def test_failed_vacancies_shown(self) -> None:
+        vacancies = [
+            {"title": "Python Dev", "employer": "Acme", "url": "https://hh.ru/v/1", "salary_text": ""},
+        ]
+        text = format_final_summary(_stats(failed=1, vacancies=vacancies), daily_limit=200, stopped_by_limit=False)
         assert "Python Dev" in text
+        assert "Acme" in text
+        assert "hh.ru/v/1" in text
 
-    def test_failure(self) -> None:
-        text = format_apply_result("Python Dev", "Acme", success=False)
-        assert "⚠️" in text
-        assert "вручную" in text.lower()
+    def test_many_failed_vacancies_truncated(self) -> None:
+        vacancies = [
+            {"title": f"Vacancy {i}", "employer": "Corp", "url": f"https://hh.ru/v/{i}", "salary_text": ""}
+            for i in range(20)
+        ]
+        text = format_final_summary(_stats(failed=20, vacancies=vacancies), daily_limit=200, stopped_by_limit=False)
+        assert "ещё" in text
 
-
-class TestFormatRunFinished:
-    def test_format(self) -> None:
-        text = format_run_finished(sent=7, skipped_test=3)
-        assert "7" in text
-        assert "3" in text
+    def test_html_escaped_in_vacancy_title(self) -> None:
+        vacancies = [
+            {"title": "<b>Bad</b>", "employer": "Corp", "url": "https://hh.ru/v/1", "salary_text": ""}
+        ]
+        text = format_final_summary(_stats(failed=1, vacancies=vacancies), daily_limit=200, stopped_by_limit=False)
+        assert "<b>Bad</b>" not in text
+        assert "&lt;b&gt;" in text

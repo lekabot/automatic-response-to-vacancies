@@ -1,160 +1,602 @@
 """
 Telegram bot handlers.
 
-Команды:
-  /start   — приветствие + chat_id
-  /whoami  — вывести chat_id (для первоначальной настройки)
-  /status  — статус последнего запуска
-  /run     — запустить поиск вручную прямо сейчас
-  /summary — получить вечерний отчёт прямо сейчас
+Сценарий:
+  /start → мастер настройки (3 шага: ключевые слова → письмо → аккаунт hh.ru)
+         → главное меню (3 кнопки редактирования + «▶️ Запустить поиск»)
+         → поиск в фоне + почасовые отчёты
+         → кнопка «⏹ Остановить»
 
-Callbacks:
-  applied:<vacancy_id>  — пользователь подтвердил отклик
-  skip:<vacancy_id>     — пользователь пропустил вакансию
+States:
+  SETUP_KEYWORDS / SETUP_COVER_LETTER / SETUP_EMAIL / SETUP_PASSWORD /
+  SELECT_RESUME / MAIN_MENU / EDIT_KEYWORDS / EDIT_COVER_LETTER /
+  EDIT_CREDENTIALS / SEARCHING
 """
 from __future__ import annotations
+
+import asyncio
+import json
 
 import structlog
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 from src import database as db
-from src.bot.formatters import format_summary
-from src.models import VacancyStatus
+from src.bot.formatters import format_final_summary, format_hourly_summary
+from src.bot.keyboards import (
+    back_keyboard,
+    main_menu_keyboard,
+    resume_keyboard,
+    skip_letter_keyboard,
+    stop_keyboard,
+)
+from src.config import get_config
+from src.hh.client import HHClient
+from src.models import UserSettings
 
 log = structlog.get_logger(__name__)
 
+(
+    SETUP_KEYWORDS,
+    SETUP_COVER_LETTER,
+    SETUP_EMAIL,
+    SETUP_PASSWORD,
+    SELECT_RESUME,
+    MAIN_MENU,
+    EDIT_KEYWORDS,
+    EDIT_COVER_LETTER,
+    EDIT_CREDENTIALS,
+    SEARCHING,
+) = range(10)
 
 # ---------------------------------------------------------------------------
-# Command handlers
+# Prompt texts
+# ---------------------------------------------------------------------------
+
+_PROMPT_KEYWORDS = (
+    "🔍 <b>Шаг 1 из 3 — Ключевые слова</b>\n\n"
+    "Введите ключевые слова для поиска вакансий через запятую.\n\n"
+    "<b>Пример:</b>\n"
+    "<code>Python разработчик, Python backend, Senior Python developer</code>"
+)
+
+_PROMPT_LETTER = (
+    "✉️ <b>Шаг 2 из 3 — Сопроводительное письмо</b>\n\n"
+    "Введите текст письма. Поддерживаются переменные:\n"
+    "<code>{title}</code> — название вакансии\n"
+    "<code>{employer}</code> — название компании\n\n"
+    "<b>Пример:</b>\n"
+    "<i>Добрый день! Меня заинтересовала вакансия «{title}» в {employer}. "
+    "Python-разработчик, 5+ лет опыта. Готов обсудить.\n\nС уважением, Иван.</i>\n\n"
+    "Введите текст или нажмите кнопку, чтобы откликаться без письма:"
+)
+
+_PROMPT_EMAIL = (
+    "🔑 <b>Шаг 3 из 3 — Аккаунт hh.ru</b>\n\n"
+    "Введите email от вашего аккаунта соискателя на hh.ru:"
+)
+
+_PROMPT_PASSWORD = (
+    "🔒 Теперь введите пароль от аккаунта hh.ru:\n\n"
+    "<i>Данные хранятся только на вашем сервере и не передаются третьим лицам.</i>"
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
-        return
-    chat_id = update.effective_chat.id
-    text = (
-        "👋 <b>HH Vacancy Assistant</b>\n\n"
-        f"Ваш <b>chat_id</b>: <code>{chat_id}</code>\n\n"
-        "Скопируйте это значение в <code>config.yaml → telegram.chat_id</code>.\n\n"
-        "Команды:\n"
-        "  /whoami — показать chat_id\n"
-        "  /run    — запустить поиск прямо сейчас\n"
-        "  /status — статус последнего запуска\n"
-        "  /summary — отчёт за сегодня"
+def _settings_text(s: UserSettings) -> str:
+    kws = s.keywords
+    kw_str = ", ".join(kws[:5]) + (f" (+{len(kws)-5})" if len(kws) > 5 else "")
+    letter = "Да" if s.cover_letter else "Нет"
+    account = _esc(s.hh_email or "—")
+    resume = _esc(s.resume_title or s.resume_id or "—")
+    return (
+        "⚙️ <b>Настройки поиска</b>\n\n"
+        f"🔍 <b>Ключевые слова:</b> {_esc(kw_str)}\n"
+        f"✉️ <b>Письмо:</b> {letter}\n"
+        f"👤 <b>Аккаунт hh.ru:</b> {account}\n"
+        f"📄 <b>Резюме:</b> {resume}\n\n"
+        "Измените настройки или запустите поиск:"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
-        return
+def _esc(t: str) -> str:
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def _login_and_get_resumes(email: str, password: str) -> tuple[bool, list[dict]]:
+    config = get_config()
+    async with HHClient(user_agent=config.hh.user_agent) as hh:
+        ok = await hh.login(email, password)
+        if not ok:
+            return False, []
+        resumes = await hh.get_resumes()
+    return True, resumes
+
+
+# ---------------------------------------------------------------------------
+# /start
+# ---------------------------------------------------------------------------
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
+    settings = await db.get_user_settings(chat_id)
+
+    if settings and settings.is_complete():
+        msg = update.message or update.callback_query.message
+        await msg.reply_text(
+            _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+        )
+        return MAIN_MENU
+
     await update.message.reply_text(
-        f"Ваш <b>chat_id</b>: <code>{chat_id}</code>",
+        "👋 <b>HH Vacancy Assistant</b>\n\n"
+        "Автоматические отклики на вакансии hh.ru. Настроим за 3 шага.\n\n"
+        + _PROMPT_KEYWORDS,
+        parse_mode=ParseMode.HTML,
+    )
+    return SETUP_KEYWORDS
+
+
+# ---------------------------------------------------------------------------
+# Шаг 1 — ключевые слова
+# ---------------------------------------------------------------------------
+
+
+async def setup_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    keywords = [k.strip() for k in update.message.text.replace("\n", ",").split(",") if k.strip()]
+    if not keywords:
+        await update.message.reply_text("⚠️ Введите хотя бы одно ключевое слово.")
+        return SETUP_KEYWORDS
+
+    await db.save_user_settings(chat_id, keywords_json=json.dumps(keywords, ensure_ascii=False))
+    await update.message.reply_text(
+        f"✅ Сохранено {len(keywords)} ключевых слов.\n\n" + _PROMPT_LETTER,
+        parse_mode=ParseMode.HTML,
+        reply_markup=skip_letter_keyboard(),
+    )
+    return SETUP_COVER_LETTER
+
+
+# ---------------------------------------------------------------------------
+# Шаг 2 — сопроводительное письмо
+# ---------------------------------------------------------------------------
+
+
+async def setup_letter_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await db.save_user_settings(update.effective_chat.id, cover_letter=update.message.text.strip())
+    await update.message.reply_text(
+        "✅ Письмо сохранено.\n\n" + _PROMPT_EMAIL, parse_mode=ParseMode.HTML
+    )
+    return SETUP_EMAIL
+
+
+async def setup_letter_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await db.save_user_settings(update.effective_chat.id, cover_letter=None)
+    await update.callback_query.edit_message_text(
+        "✅ Отклики без письма.\n\n" + _PROMPT_EMAIL, parse_mode=ParseMode.HTML
+    )
+    return SETUP_EMAIL
+
+
+# ---------------------------------------------------------------------------
+# Шаг 3 — email + пароль (два под-шага)
+# ---------------------------------------------------------------------------
+
+
+async def setup_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    email = update.message.text.strip()
+    if "@" not in email:
+        await update.message.reply_text("⚠️ Похоже, это не email. Введите корректный адрес.")
+        return SETUP_EMAIL
+
+    context.user_data["pending_email"] = email
+    await update.message.reply_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
+    return SETUP_PASSWORD
+
+
+async def setup_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    email = context.user_data.pop("pending_email", "")
+    password = update.message.text.strip()
+
+    wait = await update.message.reply_text("⏳ Проверяю данные...")
+    ok, resumes = await _login_and_get_resumes(email, password)
+
+    if not ok:
+        await wait.edit_text(
+            "❌ Не удалось войти. Проверьте email и пароль.\n\n" + _PROMPT_EMAIL,
+            parse_mode=ParseMode.HTML,
+        )
+        return SETUP_EMAIL
+
+    if not resumes:
+        await wait.edit_text("❌ Нет резюме на аккаунте. Создайте резюме на hh.ru и попробуйте снова.")
+        return SETUP_EMAIL
+
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=password)
+
+    if len(resumes) == 1:
+        r = resumes[0]
+        await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
+        settings = await db.get_user_settings(chat_id)
+        await wait.edit_text(
+            f"✅ Вход выполнен · Резюме: <b>{_esc(r.get('title', ''))}</b>",
+            parse_mode=ParseMode.HTML,
+        )
+        await update.message.reply_text(
+            _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+        )
+        return MAIN_MENU
+
+    await wait.edit_text(
+        f"✅ Вход выполнен · Найдено {len(resumes)} резюме. Выберите одно:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=resume_keyboard(resumes),
+    )
+    return SELECT_RESUME
+
+
+# ---------------------------------------------------------------------------
+# Выбор резюме
+# ---------------------------------------------------------------------------
+
+
+async def select_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    resume_id = query.data.split(":", 1)[1]
+
+    settings_now = await db.get_user_settings(chat_id)
+    resume_title = resume_id
+    if settings_now and settings_now.hh_email and settings_now.hh_password:
+        config = get_config()
+        async with HHClient(user_agent=config.hh.user_agent) as hh:
+            if await hh.login(settings_now.hh_email, settings_now.hh_password):
+                for r in await hh.get_resumes():
+                    if r.get("id") == resume_id:
+                        resume_title = r.get("title", resume_id)
+                        break
+
+    await db.save_user_settings(chat_id, resume_id=resume_id, resume_title=resume_title)
+    settings = await db.get_user_settings(chat_id)
+    await query.edit_message_text(
+        f"✅ Резюме: <b>{_esc(resume_title)}</b>", parse_mode=ParseMode.HTML
+    )
+    await query.message.reply_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+# ---------------------------------------------------------------------------
+# Главное меню
+# ---------------------------------------------------------------------------
+
+
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "edit_keywords":
+        await query.edit_message_text("✏️ Введите новые ключевые слова через запятую:")
+        return EDIT_KEYWORDS
+
+    if query.data == "edit_letter":
+        await query.edit_message_text(
+            "✏️ Введите новый текст письма или нажмите кнопку:",
+            reply_markup=skip_letter_keyboard(),
+        )
+        return EDIT_COVER_LETTER
+
+    if query.data == "edit_credentials":
+        await query.edit_message_text(
+            "✏️ Введите новый email от аккаунта hh.ru:", parse_mode=ParseMode.HTML
+        )
+        context.user_data["editing_credentials"] = True
+        return EDIT_CREDENTIALS
+
+    if query.data == "start_search":
+        return await _start_search(update, context)
+
+    return MAIN_MENU
+
+
+# ---------------------------------------------------------------------------
+# Edit states
+# ---------------------------------------------------------------------------
+
+
+async def edit_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    keywords = [k.strip() for k in update.message.text.replace("\n", ",").split(",") if k.strip()]
+    if not keywords:
+        await update.message.reply_text("⚠️ Введите хотя бы одно ключевое слово.")
+        return EDIT_KEYWORDS
+    await db.save_user_settings(chat_id, keywords_json=json.dumps(keywords, ensure_ascii=False))
+    settings = await db.get_user_settings(chat_id)
+    await update.message.reply_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+async def edit_letter_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await db.save_user_settings(update.effective_chat.id, cover_letter=update.message.text.strip())
+    settings = await db.get_user_settings(update.effective_chat.id)
+    await update.message.reply_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+async def edit_letter_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await db.save_user_settings(update.effective_chat.id, cover_letter=None)
+    settings = await db.get_user_settings(update.effective_chat.id)
+    await update.callback_query.edit_message_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+async def edit_credentials_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Первый шаг редактирования учётных данных — email."""
+    email = update.message.text.strip()
+    if "@" not in email:
+        await update.message.reply_text("⚠️ Введите корректный email.")
+        return EDIT_CREDENTIALS
+    context.user_data["pending_email"] = email
+    await update.message.reply_text(_PROMPT_PASSWORD, parse_mode=ParseMode.HTML)
+    # Сигнализируем о переходе к шагу пароля через флаг
+    context.user_data["editing_credentials"] = "password"
+    return EDIT_CREDENTIALS
+
+
+async def edit_credentials_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Второй шаг редактирования — пароль, верификация."""
+    chat_id = update.effective_chat.id
+    email = context.user_data.pop("pending_email", "")
+    password = update.message.text.strip()
+    context.user_data.pop("editing_credentials", None)
+
+    wait = await update.message.reply_text("⏳ Проверяю данные...")
+    ok, resumes = await _login_and_get_resumes(email, password)
+
+    if not ok:
+        await wait.edit_text("❌ Неверный email или пароль. Попробуйте снова:\n\n" + _PROMPT_EMAIL,
+                             parse_mode=ParseMode.HTML)
+        return EDIT_CREDENTIALS
+
+    await db.save_user_settings(chat_id, hh_email=email, hh_password=password)
+
+    if resumes:
+        r = resumes[0]
+        await db.save_user_settings(chat_id, resume_id=r["id"], resume_title=r.get("title", ""))
+
+    settings = await db.get_user_settings(chat_id)
+    await wait.edit_text("✅ Учётные данные обновлены.")
+    await update.message.reply_text(
+        _settings_text(settings), parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard()
+    )
+    return MAIN_MENU
+
+
+def _edit_credentials_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Роутер: ждём email → потом пароль."""
+    stage = context.user_data.get("editing_credentials")
+    if stage == "password":
+        return edit_credentials_password(update, context)
+    return edit_credentials_email(update, context)
+
+
+# ---------------------------------------------------------------------------
+# Запуск / остановка поиска
+# ---------------------------------------------------------------------------
+
+
+async def _start_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    settings = await db.get_user_settings(chat_id)
+    config = get_config()
+
+    if not settings or not settings.is_complete():
+        await update.callback_query.answer("⚠️ Настройки неполные.", show_alert=True)
+        return MAIN_MENU
+
+    cancel_event = asyncio.Event()
+    context.user_data["cancel_event"] = cancel_event
+
+    kw_list = "\n".join(f"• {_esc(k)}" for k in settings.keywords[:10])
+    msg = await update.callback_query.edit_message_text(
+        f"🚀 <b>Начали откликаться за вас!</b>\n\nПоиск по словам:\n{kw_list}\n\n"
+        "Каждый час присылаю статистику.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=stop_keyboard(),
+    )
+    status_msg_id = (
+        msg.message_id if hasattr(msg, "message_id") else update.callback_query.message.message_id
+    )
+
+    job = context.job_queue.run_repeating(
+        _hourly_job,
+        interval=3600,
+        first=3600,
+        chat_id=chat_id,
+        name=f"hourly_{chat_id}",
+        data={"cancel_event": cancel_event, "daily_limit": config.hh.search.daily_apply_limit},
+    )
+    context.user_data["hourly_job"] = job
+
+    task = asyncio.create_task(
+        _search_task(
+            chat_id=chat_id,
+            settings=settings,
+            bot=context.bot,
+            cancel_event=cancel_event,
+            status_msg_id=status_msg_id,
+            job_queue=context.job_queue,
+            daily_limit=config.hh.search.daily_apply_limit,
+        )
+    )
+    context.user_data["search_task"] = task
+    return SEARCHING
+
+
+async def _hourly_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data
+    if data["cancel_event"].is_set():
+        context.job.schedule_removal()
+        return
+    stats = await db.get_today_stats()
+    await context.bot.send_message(
+        chat_id=context.job.chat_id,
+        text=format_hourly_summary(stats, daily_limit=data["daily_limit"]),
         parse_mode=ParseMode.HTML,
     )
 
 
-async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    stats = await db.get_today_stats()
-    text = format_summary(stats)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+async def _search_task(
+    *,
+    chat_id: int,
+    settings: UserSettings,
+    bot,
+    cancel_event: asyncio.Event,
+    status_msg_id: int,
+    job_queue,
+    daily_limit: int,
+) -> None:
+    from src.pipeline import run_user_pipeline
 
-
-async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Запускает утренний пайплайн немедленно (для ручного тестирования)."""
-    # Импорт здесь чтобы избежать circular import
-    from src.pipeline import run_morning_pipeline
-
-    await update.message.reply_text("🔍 Запускаю поиск вакансий...")
     try:
-        await run_morning_pipeline(context.application)
-    except Exception as exc:
-        log.exception("cmd_run.error", error=str(exc))
-        await update.message.reply_text(f"❌ Ошибка: {exc}")
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    stats = await db.get_today_stats()
-    counts = stats["counts"]
-    text = (
-        "📈 <b>Статус за сегодня</b>\n\n"
-        f"Предложено: {counts.get('sent', 0)}\n"
-        f"Откликнулся: {counts.get('applied_confirmed', 0)}\n"
-        f"Пропущено: {counts.get('skipped', 0)}\n"
-        f"С тестом: {counts.get('requires_test', 0)}"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-
-# ---------------------------------------------------------------------------
-# Callback handlers
-# ---------------------------------------------------------------------------
-
-
-async def callback_applied(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик кнопки «Подтвердить отклик»."""
-    query = update.callback_query
-    await query.answer("✅ Отклик засчитан!")
-
-    vacancy_id = query.data.split(":", 1)[1]
-    await db.set_vacancy_status(vacancy_id, VacancyStatus.APPLIED_CONFIRMED)
-    await db.log_action("applied_confirmed", vacancy_id=vacancy_id)
-
-    # Редактируем кнопки — убираем callback-кнопки, оставляем только URL
-    try:
-        from telegram import InlineKeyboardMarkup
-
-        # Получаем текущую клавиатуру и оставляем только первую строку (URL-кнопки)
-        current_markup = query.message.reply_markup
-        url_row = current_markup.inline_keyboard[0] if current_markup else []
-        new_markup = InlineKeyboardMarkup([url_row]) if url_row else None
-
-        await query.edit_message_reply_markup(reply_markup=new_markup)
-        await query.message.reply_text(
-            "✅ <b>Отклик подтверждён!</b>",
-            parse_mode=ParseMode.HTML,
+        result = await run_user_pipeline(
+            chat_id=chat_id,
+            hh_email=settings.hh_email,
+            hh_password=settings.hh_password,
+            resume_id=settings.resume_id,
+            keywords=settings.keywords,
+            cover_letter=settings.cover_letter or "",
+            cancel_event=cancel_event,
         )
     except Exception as exc:
-        log.warning("callback_applied.edit_error", error=str(exc))
+        log.exception("search_task.error", error=str(exc))
+        result = {"applied": 0, "stopped_by_limit": False}
 
-    log.info("vacancy.applied_confirmed", vacancy_id=vacancy_id)
+    for job in job_queue.get_jobs_by_name(f"hourly_{chat_id}"):
+        job.schedule_removal()
+
+    stats = await db.get_today_stats()
+    text = format_final_summary(
+        stats, daily_limit=daily_limit, stopped_by_limit=result["stopped_by_limit"]
+    )
+
+    if not cancel_event.is_set():
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=status_msg_id, text=text,
+                parse_mode=ParseMode.HTML, reply_markup=back_keyboard(),
+                disable_web_page_preview=True,
+            )
+            return
+        except Exception:
+            pass
+    await bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(), disable_web_page_preview=True,
+    )
 
 
-async def callback_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик кнопки «Пропустить»."""
+async def stop_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer("⏭ Вакансия пропущена")
+    await query.answer("Останавливаю...")
 
-    vacancy_id = query.data.split(":", 1)[1]
-    await db.set_vacancy_status(vacancy_id, VacancyStatus.SKIPPED)
-    await db.log_action("skipped", vacancy_id=vacancy_id)
+    cancel_event: asyncio.Event | None = context.user_data.get("cancel_event")
+    if cancel_event:
+        cancel_event.set()
 
-    # Убираем callback-кнопки
-    try:
-        current_markup = query.message.reply_markup
-        url_row = current_markup.inline_keyboard[0] if current_markup else []
-        new_markup = InlineKeyboardMarkup([url_row]) if url_row else None
-        await query.edit_message_reply_markup(reply_markup=new_markup)
-    except Exception as exc:
-        log.warning("callback_skip.edit_error", error=str(exc))
+    for job in context.job_queue.get_jobs_by_name(f"hourly_{update.effective_chat.id}"):
+        job.schedule_removal()
 
-    log.info("vacancy.skipped", vacancy_id=vacancy_id)
+    stats = await db.get_today_stats()
+    config = get_config()
+    text = format_final_summary(stats, daily_limit=config.hh.search.daily_apply_limit, stopped_by_limit=False)
+    await query.edit_message_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=back_keyboard(), disable_web_page_preview=True
+    )
+    return SEARCHING
+
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    task: asyncio.Task | None = context.user_data.get("search_task")
+    if task and not task.done():
+        task.cancel()
+
+    settings = await db.get_user_settings(update.effective_chat.id)
+    await query.edit_message_text(
+        _settings_text(settings) if settings else "Настройки не найдены.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard() if settings else None,
+    )
+    return MAIN_MENU
 
 
 # ---------------------------------------------------------------------------
-# Registration
+# Регистрация
 # ---------------------------------------------------------------------------
 
 
 def register_handlers(app: Application) -> None:
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("whoami", cmd_whoami))
-    app.add_handler(CommandHandler("run", cmd_run))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("summary", cmd_summary))
-    app.add_handler(CallbackQueryHandler(callback_applied, pattern=r"^applied:"))
-    app.add_handler(CallbackQueryHandler(callback_skip, pattern=r"^skip:"))
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", cmd_start)],
+        states={
+            SETUP_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_keywords)],
+            SETUP_COVER_LETTER: [
+                CallbackQueryHandler(setup_letter_skip, pattern="^skip_letter$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setup_letter_text),
+            ],
+            SETUP_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_email)],
+            SETUP_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_password)],
+            SELECT_RESUME: [CallbackQueryHandler(select_resume, pattern=r"^resume:")],
+            MAIN_MENU: [
+                CallbackQueryHandler(
+                    main_menu,
+                    pattern=r"^(edit_keywords|edit_letter|edit_credentials|start_search)$",
+                )
+            ],
+            EDIT_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_keywords)],
+            EDIT_COVER_LETTER: [
+                CallbackQueryHandler(edit_letter_skip, pattern="^skip_letter$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_letter_text),
+            ],
+            EDIT_CREDENTIALS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, _edit_credentials_handler)
+            ],
+            SEARCHING: [
+                CallbackQueryHandler(stop_search, pattern="^stop_search$"),
+                CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"),
+            ],
+        },
+        fallbacks=[CommandHandler("start", cmd_start)],
+        per_user=True,
+        per_chat=True,
+        allow_reentry=True,
+    )
+    app.add_handler(conv)

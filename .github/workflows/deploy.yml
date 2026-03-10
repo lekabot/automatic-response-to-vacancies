@@ -1,0 +1,86 @@
+name: CI / CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# ──────────────────────────────────────────────
+# GitHub Secrets (обязательные):
+#   TELEGRAM_BOT_TOKEN  — токен от @BotFather
+#   SSH_HOST            — IP или hostname сервера
+#   SSH_USER            — пользователь на сервере
+#   SSH_KEY             — приватный SSH-ключ (RSA/Ed25519)
+#
+# GitHub Variables (опциональные, с дефолтами):
+#   SSH_PORT            — SSH порт (default: 22)
+#   DEPLOY_PATH         — путь на сервере (default: /opt/hh-assistant)
+# ──────────────────────────────────────────────
+
+jobs:
+  # ── Тесты ─────────────────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ── Деплой ────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    needs: test
+    runs-on: ubuntu-latest
+
+    # Деплоим только при пуше в main (не на PR)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          envs: TELEGRAM_BOT_TOKEN
+          script: |
+            set -euo pipefail
+
+            DEPLOY_PATH="${{ vars.DEPLOY_PATH || '/opt/hh-assistant' }}"
+
+            # Первичная инициализация репозитория (если ещё нет)
+            if [ ! -d "$DEPLOY_PATH/.git" ]; then
+              git clone "${{ github.server_url }}/${{ github.repository }}.git" "$DEPLOY_PATH"
+            fi
+
+            cd "$DEPLOY_PATH"
+
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Создаём .env из GitHub Secrets (не коммитится в репо)
+            printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" > .env
+
+            # Пересобираем и запускаем контейнеры
+            docker compose pull --quiet
+            docker compose up -d --build --remove-orphans
+
+            echo "✅ Deploy complete: $(git log -1 --oneline)"

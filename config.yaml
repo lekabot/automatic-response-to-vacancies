@@ -1,21 +1,16 @@
 hh:
-  user_agent: "HHVacancyAssistant/1.0 (contact: your@email.com)"
+  user_agent: "HHVacancyAssistant/1.0"
   rate_limit:
     qps: 2
     burst: 5
   search:
-    # Ключевые слова для поиска (OR-логика между словами)
-    include_keywords:
-      - "Python developer"
-      - "Python backend"
-      - "Python разработчик"
-    # Вакансии, содержащие эти слова в названии/описании, будут отфильтрованы
+    # Вакансии с этими словами в названии пропускаются
     exclude_keywords:
       - "1C"
       - "junior"
       - "intern"
       - "стажёр"
-    # Регионы: 1=Москва, 2=Санкт-Петербург, 113=Россия (весь)
+    # Регионы: 1=Москва, 2=Санкт-Петербург, 113=Россия
     area:
       - 1
       - 2
@@ -26,21 +21,13 @@ hh:
     # full, part, project, volunteer, probation
     employment:
       - "full"
-    # Вакансии, опубликованные за последние N часов
+    # Вакансии опубликованные за последние N часов
     published_within_hours: 24
     # Максимум вакансий за один запуск
     max_vacancies_per_run: 200
-
-telegram:
-  # chat_id куда слать уведомления (узнать через команду /whoami)
-  chat_id: 0  # REPLACE: ваш chat_id
-
-runtime:
-  timezone: "Europe/Moscow"
-  run_time: "10:00"      # Утренний поиск
-  summary_time: "18:00"  # Вечерний отчёт
+    # Дневной лимит откликов (hh.ru ограничивает ~200/день)
+    daily_apply_limit: 200
 
 storage:
-  driver: "sqlite"
   sqlite_path: "/data/bot.sqlite"
   retention_days: 30
