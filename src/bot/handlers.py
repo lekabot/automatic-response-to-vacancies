@@ -507,16 +507,6 @@ async def _start_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         msg.message_id if hasattr(msg, "message_id") else update.callback_query.message.message_id
     )
 
-    job = context.job_queue.run_repeating(
-        _hourly_job,
-        interval=3600,
-        first=3600,
-        chat_id=chat_id,
-        name=f"hourly_{chat_id}",
-        data={"cancel_event": cancel_event, "daily_limit": config.hh.search.daily_apply_limit},
-    )
-    context.user_data["hourly_job"] = job
-
     task = asyncio.create_task(
         _search_task(
             chat_id=chat_id,
@@ -532,18 +522,6 @@ async def _start_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return SEARCHING
 
 
-async def _hourly_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    data = context.job.data
-    if data["cancel_event"].is_set():
-        context.job.schedule_removal()
-        return
-    stats = await db.get_today_stats()
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=format_hourly_summary(stats, daily_limit=data["daily_limit"]),
-        parse_mode=ParseMode.HTML,
-    )
-
 
 async def _search_task(
         *,
@@ -556,21 +534,49 @@ async def _search_task(
         daily_limit: int,
 ) -> None:
     from src.pipeline import run_user_pipeline
+    config = get_config()
+    repeat_minutes = config.hh.search.repeat_interval_minutes
+    cycle = 0
 
-    try:
-        result = await run_user_pipeline(
-            chat_id=chat_id,
-            hh_email=settings.hh_email,
-            hh_password=settings.hh_password,
-            hhtoken=settings.hhtoken,
-            resume_id=settings.resume_id,
-            keywords=settings.keywords,
-            cover_letter=settings.cover_letter or "",
-            cancel_event=cancel_event,
-        )
-    except Exception as exc:
-        log.exception("search_task.error", error=str(exc))
-        result = {"applied": 0, "stopped_by_limit": False}
+    while not cancel_event.is_set():
+        cycle += 1
+        try:
+            result = await run_user_pipeline(
+                chat_id=chat_id,
+                hh_email=settings.hh_email,
+                hh_password=settings.hh_password,
+                hhtoken=settings.hhtoken,
+                resume_id=settings.resume_id,
+                keywords=settings.keywords,
+                cover_letter=settings.cover_letter or "",
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            log.exception("search_task.error", error=str(exc))
+            result = {"applied": 0, "stopped_by_limit": False}
+
+        # Дневной лимит — завершаем
+        if result["stopped_by_limit"] or cancel_event.is_set():
+            break
+
+        # Промежуточный отчёт после каждого цикла (кроме последнего)
+        if repeat_minutes > 0:
+            stats = await db.get_today_stats()
+            await bot.send_message(
+                chat_id=chat_id,
+                text=format_hourly_summary(stats, daily_limit=daily_limit),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            log.info("search_task.cycle_done", cycle=cycle, next_in_minutes=repeat_minutes)
+            # Ждём repeat_minutes минут с возможностью прервать через cancel_event
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=repeat_minutes * 60)
+                break  # cancel_event сработал
+            except asyncio.TimeoutError:
+                pass  # время вышло — запускаем следующий цикл
+        else:
+            break  # repeat_interval_minutes=0 — один запуск
 
     for job in job_queue.get_jobs_by_name(f"hourly_{chat_id}"):
         job.schedule_removal()

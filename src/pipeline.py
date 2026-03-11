@@ -82,13 +82,19 @@ async def run_user_pipeline(
                 break
 
             try:
-                applied = await _process_vacancy(
-                    vacancy=vacancy,
-                    hh=hh,
-                    cover_letter=cover_letter,
-                    resume_id=resume_id,
-                    config=config,
+                applied = await asyncio.wait_for(
+                    _process_vacancy(
+                        vacancy=vacancy,
+                        hh=hh,
+                        cover_letter=cover_letter,
+                        resume_id=resume_id,
+                        config=config,
+                    ),
+                    timeout=20.0,
                 )
+            except asyncio.TimeoutError:
+                log.warning("pipeline.vacancy.timeout", vacancy_id=vacancy.id)
+                applied = False
             except Exception as exc:
                 log.exception("pipeline.vacancy.error", vacancy_id=vacancy.id, error=str(exc))
                 applied = False

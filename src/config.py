@@ -29,6 +29,8 @@ class SearchConfig(BaseModel):
     daily_apply_limit: int = 200
     # Поля для поиска: name = только заголовок (рекомендуется), описание включает шум
     search_field: list[str] = ["name"]
+    # Интервал между повторными поисками в минутах (0 = не повторять)
+    repeat_interval_minutes: int = 60
 
 
 class HHConfig(BaseModel):
