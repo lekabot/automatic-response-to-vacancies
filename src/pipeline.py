@@ -81,13 +81,18 @@ async def run_user_pipeline(
                 log.info("pipeline.daily_limit_reached", limit=config.hh.search.daily_apply_limit)
                 break
 
-            applied = await _process_vacancy(
-                vacancy=vacancy,
-                hh=hh,
-                cover_letter=cover_letter,
-                resume_id=resume_id,
-                config=config,
-            )
+            try:
+                applied = await _process_vacancy(
+                    vacancy=vacancy,
+                    hh=hh,
+                    cover_letter=cover_letter,
+                    resume_id=resume_id,
+                    config=config,
+                )
+            except Exception as exc:
+                log.exception("pipeline.vacancy.error", vacancy_id=vacancy.id, error=str(exc))
+                applied = False
+
             if applied:
                 result["applied"] += 1
 

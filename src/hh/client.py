@@ -356,11 +356,21 @@ class HHClient:
     # Apply (web session, требует login())
     # ------------------------------------------------------------------
 
+    async def _ensure_xsrf(self) -> str | None:
+        """Возвращает XSRF из сессии; если отсутствует — обновляет через GET /."""
+        xsrf = self._xsrf()
+        if xsrf:
+            return xsrf
+        try:
+            resp = await self._get(f"{WEB_BASE}/")
+            return self._xsrf() or self._extract_xsrf(resp.text)
+        except Exception:
+            return None
+
     async def apply(self, *, vacancy_id: str, resume_id: str, letter: str = "") -> bool:
         """
         Откликнуться на вакансию через /applicant/vacancy_response/popup (FormData).
 
-        Фактический endpoint: POST /applicant/vacancy_response/popup
         Поля: vacancy_id, resume_hash (не resume_id!), ignore_postponed, lux, letter
         Требует предварительного вызова login() или передачи hhtoken в конструктор.
         """
@@ -368,19 +378,18 @@ class HHClient:
             log.error("hh.apply.not_logged_in", vacancy_id=vacancy_id)
             return False
 
-        # Защита от resume_id с query string (из-за старых данных в БД)
         resume_hash = resume_id.split("?")[0]
+        vacancy_url = f"{WEB_BASE}/vacancy/{vacancy_id}"
 
         try:
-            vacancy_url = f"{WEB_BASE}/vacancy/{vacancy_id}"
-            await self._get(vacancy_url)
-            xsrf = self._xsrf()
+            # XSRF берём из сессии — он действителен для всей сессии.
+            # GET страницы вакансии не нужен и может подвиснуть (редиректы на ATS-системы).
+            xsrf = await self._ensure_xsrf()
             if not xsrf:
                 log.error("hh.apply.no_xsrf", vacancy_id=vacancy_id)
                 return False
 
-            # hh.ru использует FormData и поле resume_hash (не resume_id)
-            form = {
+            form: dict[str, str] = {
                 "vacancy_id": vacancy_id,
                 "resume_hash": resume_hash,
                 "ignore_postponed": "true",
@@ -389,6 +398,7 @@ class HHClient:
             if letter:
                 form["letter"] = letter
 
+            await self._rate.acquire()
             resp = await self._client.post(
                 f"{WEB_BASE}/applicant/vacancy_response/popup",
                 data=form,
@@ -403,7 +413,6 @@ class HHClient:
                 body = resp.json()
                 error = body.get("error", "")
                 if error == "alreadyApplied":
-                    # Уже откликались — считаем успехом (цель достигнута)
                     log.info("hh.apply.already_applied", vacancy_id=vacancy_id)
                     return True
                 ok = resp.status_code == 200 and body.get("success") == "true"
