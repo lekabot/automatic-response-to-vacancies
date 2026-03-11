@@ -52,7 +52,13 @@ async def vacancy_already_seen(vacancy_id: str, retention_days: int) -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     async with get_session() as session:
         row = await session.get(VacancySeen, vacancy_id)
-        return row is not None and row.seen_at >= cutoff
+        if row is None:
+            return False
+        # SQLite возвращает naive datetime — приводим к UTC для сравнения
+        seen_at = row.seen_at
+        if seen_at.tzinfo is None:
+            seen_at = seen_at.replace(tzinfo=timezone.utc)
+        return seen_at >= cutoff
 
 
 async def upsert_vacancy(
@@ -84,7 +90,8 @@ async def upsert_vacancy(
 
 async def get_applied_today_count() -> int:
     """Количество успешных откликов за последние 24 часа."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Сравниваем наивными датами, так как SQLite хранит без timezone
+    cutoff = datetime.utcnow() - timedelta(hours=24)
     async with get_session() as session:
         result = await session.execute(
             select(VacancySeen).where(
@@ -97,7 +104,8 @@ async def get_applied_today_count() -> int:
 
 async def get_today_stats() -> dict:
     """Статистика за последние 24 часа: счётчики + список неудачных откликов."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Сравниваем наивными датами, так как SQLite хранит без timezone
+    cutoff = datetime.utcnow() - timedelta(hours=24)
     async with get_session() as session:
         result = await session.execute(
             select(VacancySeen).where(VacancySeen.seen_at >= cutoff)
