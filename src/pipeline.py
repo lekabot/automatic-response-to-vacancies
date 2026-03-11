@@ -178,7 +178,15 @@ async def _process_vacancy(
         else ""
     )
 
-    applied = await hh.apply(vacancy_id=vacancy.id, resume_id=resume_id, letter=letter)
+    # True = новый отклик, None = уже откликались ранее, False = ошибка
+    apply_result = await hh.apply(vacancy_id=vacancy.id, resume_id=resume_id, letter=letter)
+
+    if apply_result is True:
+        status = VacancyStatus.APPLIED
+    elif apply_result is None:
+        status = VacancyStatus.ALREADY_APPLIED
+    else:
+        status = VacancyStatus.APPLY_FAILED
 
     await db.upsert_vacancy(
         vacancy_id=vacancy.id,
@@ -186,8 +194,8 @@ async def _process_vacancy(
         employer=vacancy.employer.name,
         url=vacancy.vacancy_url,
         salary_text=vacancy.salary_text,
-        status=VacancyStatus.APPLIED if applied else VacancyStatus.APPLY_FAILED,
+        status=status,
     )
 
-    log.info("pipeline.vacancy", vacancy_id=vacancy.id, title=vacancy.name, applied=applied)
-    return applied
+    log.info("pipeline.vacancy", vacancy_id=vacancy.id, title=vacancy.name, status=status.value)
+    return apply_result is True  # считаем только новые отклики

@@ -14,10 +14,11 @@ class Base(DeclarativeBase):
 
 
 class VacancyStatus(str, enum.Enum):
-    APPLIED = "APPLIED"              # Успешный отклик через API
-    APPLY_FAILED = "APPLY_FAILED"    # API вернул ошибку — можно откликнуться вручную
-    SKIPPED = "SKIPPED"              # Отфильтровано по exclude_keywords
-    REQUIRES_TEST = "REQUIRES_TEST"  # Вакансия с тестом — пропускаем
+    APPLIED = "APPLIED"                    # Новый отклик, отправлен в этой сессии
+    ALREADY_APPLIED = "ALREADY_APPLIED"    # hh.ru: уже откликались ранее — не считаем
+    APPLY_FAILED = "APPLY_FAILED"          # API вернул ошибку — можно откликнуться вручную
+    SKIPPED = "SKIPPED"                    # Отфильтровано по exclude_keywords
+    REQUIRES_TEST = "REQUIRES_TEST"        # Вакансия с тестом — пропускаем
 
 
 class VacancySeen(Base):

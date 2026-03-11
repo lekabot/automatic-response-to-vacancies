@@ -487,6 +487,12 @@ async def _start_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.callback_query.answer("⚠️ Настройки неполные.", show_alert=True)
         return MAIN_MENU
 
+    # Защита от двойного запуска
+    existing_task: asyncio.Task | None = context.user_data.get("search_task")
+    if existing_task and not existing_task.done():
+        await update.callback_query.answer("⚠️ Поиск уже запущен!", show_alert=True)
+        return SEARCHING
+
     cancel_event = asyncio.Event()
     context.user_data["cancel_event"] = cancel_event
 

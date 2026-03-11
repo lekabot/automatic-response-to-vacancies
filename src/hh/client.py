@@ -367,7 +367,13 @@ class HHClient:
         except Exception:
             return None
 
-    async def apply(self, *, vacancy_id: str, resume_id: str, letter: str = "") -> bool:
+    async def apply(self, *, vacancy_id: str, resume_id: str, letter: str = "") -> bool | None:
+        """
+        Возвращает:
+          True  — новый отклик успешно отправлен
+          None  — уже откликались ранее (hh.ru: alreadyApplied)
+          False — ошибка отклика
+        """
         """
         Откликнуться на вакансию через /applicant/vacancy_response/popup (FormData).
 
@@ -413,8 +419,9 @@ class HHClient:
                 body = resp.json()
                 error = body.get("error", "")
                 if error == "alreadyApplied":
+                    # Уже откликались ранее — не считаем как новый отклик
                     log.info("hh.apply.already_applied", vacancy_id=vacancy_id)
-                    return True
+                    return None
                 ok = resp.status_code == 200 and body.get("success") == "true"
             except Exception:
                 ok = resp.status_code in (200, 201)
