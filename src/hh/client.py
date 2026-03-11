@@ -353,8 +353,10 @@ class HHClient:
 
     async def apply(self, *, vacancy_id: str, resume_id: str, letter: str = "") -> bool:
         """
-        Откликнуться на вакансию через web-сессию.
+        Откликнуться на вакансию через /applicant/vacancy_response/popup (FormData).
 
+        Фактический endpoint: POST /applicant/vacancy_response/popup
+        Поля: vacancy_id, resume_hash (не resume_id!), ignore_postponed, lux, letter
         Требует предварительного вызова login() или передачи hhtoken в конструктор.
         """
         if not self._logged_in:
@@ -362,40 +364,50 @@ class HHClient:
             return False
 
         # Защита от resume_id с query string (из-за старых данных в БД)
-        clean_resume_id = resume_id.split("?")[0]
+        resume_hash = resume_id.split("?")[0]
 
         try:
-            # Обновляем XSRF-токен, открыв страницу вакансии
-            await self._get(f"{WEB_BASE}/vacancy/{vacancy_id}")
+            vacancy_url = f"{WEB_BASE}/vacancy/{vacancy_id}"
+            await self._get(vacancy_url)
             xsrf = self._xsrf()
             if not xsrf:
                 log.error("hh.apply.no_xsrf", vacancy_id=vacancy_id)
                 return False
 
+            # hh.ru использует FormData и поле resume_hash (не resume_id)
+            form = {
+                "vacancy_id": vacancy_id,
+                "resume_hash": resume_hash,
+                "ignore_postponed": "true",
+                "lux": "true",
+            }
+            if letter:
+                form["letter"] = letter
+
             resp = await self._client.post(
-                f"{WEB_BASE}/applicant/vacancy_response",
-                data={
-                    "vacancy_id": vacancy_id,
-                    "resume_id": clean_resume_id,
-                    "letter": letter,
-                    "_xsrf": xsrf,
-                    "ignore_postponed": "1",
-                },
+                f"{WEB_BASE}/applicant/vacancy_response/popup",
+                data=form,
                 headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Referer": f"{WEB_BASE}/vacancy/{vacancy_id}",
+                    "Referer": vacancy_url,
                     "X-XSRFToken": xsrf,
                     "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
                 },
             )
-            ok = resp.status_code in (200, 302, 303)
+            try:
+                body = resp.json()
+                error = body.get("error", "")
+                if error == "alreadyApplied":
+                    # Уже откликались — считаем успехом (цель достигнута)
+                    log.info("hh.apply.already_applied", vacancy_id=vacancy_id)
+                    return True
+                ok = resp.status_code == 200 and body.get("success") == "true"
+            except Exception:
+                ok = resp.status_code in (200, 201)
+                body = resp.text[:400]
+
             if not ok:
-                log.warning(
-                    "hh.apply.failed",
-                    vacancy_id=vacancy_id,
-                    status=resp.status_code,
-                    body=resp.text[:400],
-                )
+                log.warning("hh.apply.failed", vacancy_id=vacancy_id, status=resp.status_code, body=str(body)[:400])
             log.info("hh.apply.result", vacancy_id=vacancy_id, status=resp.status_code, ok=ok)
             return ok
 
