@@ -358,6 +358,18 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if query.data == "start_search":
         return await _start_search(update, context)
 
+    if query.data == "reset_applications":
+        count = await db.reset_applied_vacancies()
+        settings = await db.get_user_settings(update.effective_chat.id)
+        await query.answer(f"Удалено {count} записей")
+        await query.edit_message_text(
+            f"🗑 <b>История откликов очищена</b> ({count} записей удалено)\n\n"
+            + _settings_text(settings),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+        return MAIN_MENU
+
     return MAIN_MENU
 
 
@@ -636,7 +648,7 @@ def register_handlers(app: Application) -> None:
             MAIN_MENU: [
                 CallbackQueryHandler(
                     main_menu,
-                    pattern=r"^(edit_keywords|edit_letter|edit_credentials|start_search)$",
+                    pattern=r"^(edit_keywords|edit_letter|edit_credentials|start_search|reset_applications)$",
                 )
             ],
             EDIT_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_keywords)],

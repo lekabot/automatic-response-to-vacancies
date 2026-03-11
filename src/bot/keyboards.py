@@ -12,6 +12,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("✏️ Письмо", callback_data="edit_letter"),
             ],
             [InlineKeyboardButton("✏️ Аккаунт hh.ru", callback_data="edit_credentials")],
+            [InlineKeyboardButton("🗑 Сбросить историю откликов", callback_data="reset_applications")],
             [InlineKeyboardButton("▶️ Запустить поиск", callback_data="start_search")],
         ]
     )

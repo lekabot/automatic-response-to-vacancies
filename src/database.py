@@ -136,6 +136,18 @@ async def get_today_stats() -> dict:
     }
 
 
+async def reset_applied_vacancies() -> int:
+    """Удаляет записи об откликах из БД, чтобы бот мог откликнуться повторно.
+
+    Returns:
+        Количество удалённых записей.
+    """
+    from sqlalchemy import delete as sa_delete
+    async with get_session() as session:
+        result = await session.execute(sa_delete(VacancySeen))
+        return result.rowcount
+
+
 # ---------------------------------------------------------------------------
 # User settings
 # ---------------------------------------------------------------------------
