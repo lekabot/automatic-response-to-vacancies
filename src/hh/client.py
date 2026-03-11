@@ -302,6 +302,7 @@ class HHClient:
         area: list[int],
         schedule: list[str] | None,
         employment: list[str] | None,
+        search_field: list[str] | None,
         period: int,
         page: int,
         per_page: int = 50,
@@ -317,6 +318,8 @@ class HHClient:
             params["schedule"] = schedule
         if employment:
             params["employment"] = employment
+        if search_field:
+            params["search_field"] = search_field
 
         await self._rate.acquire()
         resp = await self._client.get(f"{API_BASE}/vacancies", params=params)
@@ -330,6 +333,7 @@ class HHClient:
         area: list[int],
         schedule: list[str] | None = None,
         employment: list[str] | None = None,
+        search_field: list[str] | None = None,
         period: int = 1,
         max_vacancies: int = 200,
     ) -> list[VacancySchema]:
@@ -339,7 +343,8 @@ class HHClient:
         while len(vacancies) < max_vacancies:
             result = await self._search_page(
                 text=text, area=area, schedule=schedule,
-                employment=employment, period=period, page=page,
+                employment=employment, search_field=search_field,
+                period=period, page=page,
             )
             vacancies.extend(result.items)
             if page >= result.pages - 1 or not result.items:

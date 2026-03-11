@@ -89,6 +89,24 @@ class VacancySchema(BaseModel):
         name_lower = self.name.lower()
         return any(kw.lower() in name_lower for kw in exclude_keywords)
 
+    def matches_keywords(self, keywords: list[str]) -> bool:
+        """
+        True если название содержит хотя бы одно слово из любого ключевого запроса.
+
+        Пример: keywords=["Python разработчик", "Senior Python"]
+        → True для "Python-разработчик backend", "Senior Python developer"
+        → False для "DevOps инженер", "BI-аналитик"
+        """
+        if not keywords:
+            return True
+        name_lower = self.name.lower()
+        for keyword in keywords:
+            # Разбиваем фразу на отдельные слова и проверяем каждое
+            words = [w.strip() for w in keyword.lower().split() if len(w.strip()) > 2]
+            if any(word in name_lower for word in words):
+                return True
+        return False
+
 
 class VacanciesResponse(BaseModel):
     """Ответ /vacancies."""

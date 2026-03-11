@@ -97,7 +97,7 @@ async def run_user_pipeline(
 
 
 async def _collect_vacancies(hh: HHClient, keywords: list[str], config) -> list[VacancySchema]:
-    """Собирает уникальные вакансии по всем ключевым словам."""
+    """Собирает уникальные вакансии по всем ключевым словам, фильтруя по заголовку."""
     vacancies: list[VacancySchema] = []
     seen_ids: set[str] = set()
 
@@ -108,14 +108,17 @@ async def _collect_vacancies(hh: HHClient, keywords: list[str], config) -> list[
                 area=config.hh.search.area,
                 schedule=config.hh.search.schedule or None,
                 employment=config.hh.search.employment or None,
+                search_field=config.hh.search.search_field or None,
                 period=max(1, config.hh.search.published_within_hours // 24),
                 max_vacancies=config.hh.search.max_vacancies_per_run,
             )
+            added = 0
             for v in fetched:
-                if v.id not in seen_ids:
+                if v.id not in seen_ids and v.matches_keywords(keywords):
                     seen_ids.add(v.id)
                     vacancies.append(v)
-            log.info("pipeline.keyword.done", keyword=keyword, count=len(fetched))
+                    added += 1
+            log.info("pipeline.keyword.done", keyword=keyword, fetched=len(fetched), added=added)
         except Exception as exc:
             log.exception("pipeline.keyword.error", keyword=keyword, error=str(exc))
 

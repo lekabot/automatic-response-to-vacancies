@@ -27,6 +27,8 @@ class SearchConfig(BaseModel):
     published_within_hours: int = 24
     max_vacancies_per_run: int = 200
     daily_apply_limit: int = 200
+    # Поля для поиска: name = только заголовок (рекомендуется), описание включает шум
+    search_field: list[str] = ["name"]
 
 
 class HHConfig(BaseModel):
