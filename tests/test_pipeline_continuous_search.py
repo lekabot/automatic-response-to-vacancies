@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -184,14 +185,12 @@ async def test_empty_waves_short_poll_then_continue(sqlite_db, monkeypatch) -> N
     monkeypatch.setattr("src.pipeline.HHClient", MockHH)
     ev = asyncio.Event()
 
-    async def stop() -> None:
-        await asyncio.sleep(0.2)
-        ev.set()
-
     events2: list[tuple[str, dict]] = []
 
     def cap2(msg: str, **kw: object) -> None:
         events2.append((msg, dict(kw)))
+        if msg == "pipeline.poll_sleep" and kw.get("reason") == "wave_finished_continue":
+            ev.set()
 
     import src.pipeline as pl2
 
@@ -202,18 +201,30 @@ async def test_empty_waves_short_poll_then_continue(sqlite_db, monkeypatch) -> N
     m2.exception = MagicMock()
     monkeypatch.setattr(pl2, "log", m2)
 
-    asyncio.create_task(stop())
-    await run_user_pipeline(
-        chat_id=CID,
-        hh_email="a@a.a",
-        hh_password=None,
-        hhtoken="t",
-        resume_id="r",
-        keywords=["Python"],
-        cover_letter="",
-        cancel_event=ev,
-        bot=None,
-    )
+    async def stop_fallback() -> None:
+        await asyncio.sleep(8.0)
+        ev.set()
+
+    fb = asyncio.create_task(stop_fallback())
+    try:
+        await asyncio.wait_for(
+            run_user_pipeline(
+                chat_id=CID,
+                hh_email="a@a.a",
+                hh_password=None,
+                hhtoken="t",
+                resume_id="r",
+                keywords=["Python"],
+                cover_letter="",
+                cancel_event=ev,
+                bot=None,
+            ),
+            timeout=15.0,
+        )
+    finally:
+        fb.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await fb
     no_new = [e for e in events2 if e[0] == "pipeline.search.no_new_vacancies"]
     assert len(no_new) >= 2
     polls = [e for e in events2 if e[0] == "pipeline.poll_sleep"]
