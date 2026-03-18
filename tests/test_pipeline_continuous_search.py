@@ -294,11 +294,3 @@ async def test_hourly_report_once_while_polling_many_cycles(sqlite_db, monkeypat
     assert len(hourly_msgs) == 1
     waves = [e for e in events3 if e[0] == "pipeline.wave.start"]
     assert len(waves) >= 4
-</think>
-
-I need to fix the test_empty_waves test - I didn't finish it. Let me use the same log capture pattern as the first test.
-</think>
-
-
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-StrReplace
