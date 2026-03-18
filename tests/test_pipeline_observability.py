@@ -25,7 +25,7 @@ async def sqlite_db(tmp_path):
     db._session_factory = None  # type: ignore[attr-defined]
 
 
-def _cfg(monkeypatch, *, repeat_minutes: float = 0, daily_limit: int = 50) -> None:
+def _cfg(monkeypatch, *, search_poll_interval_seconds: int = 0, daily_limit: int = 50) -> None:
     cfg = SimpleNamespace()
     cfg.hh = SimpleNamespace(
         user_agent="UA",
@@ -43,7 +43,8 @@ def _cfg(monkeypatch, *, repeat_minutes: float = 0, daily_limit: int = 50) -> No
             pipeline_heartbeat_every=100,
             apply_total_timeout_seconds=30.0,
             apply_per_attempt_timeout_seconds=10.0,
-            repeat_interval_minutes=repeat_minutes,
+            repeat_interval_minutes=60,
+            search_poll_interval_seconds=search_poll_interval_seconds,
         ),
     )
     cfg.storage = SimpleNamespace(retention_days=30)
@@ -117,7 +118,7 @@ async def test_wave_summary_when_all_terminal_already_applied(sqlite_db, monkeyp
             ]
 
     monkeypatch.setattr("src.pipeline.HHClient", MockHH)
-    _cfg(monkeypatch, repeat_minutes=0)
+    _cfg(monkeypatch, search_poll_interval_seconds=0)
 
     await run_user_pipeline(
         chat_id=C,
@@ -138,7 +139,7 @@ async def test_wave_summary_when_all_terminal_already_applied(sqlite_db, monkeyp
     assert payload["skipped_terminal"] == 2
     assert payload["apply_attempted"] == 0
     assert payload["terminal_only_wave"] is True
-    assert payload["next_action"] == "complete"
+    assert payload["next_action"] == "complete"  # poll=0 → одна волна
 
     no_act = [e for e in info_events if e[0] == "pipeline.wave.no_actionable_vacancies"]
     assert len(no_act) == 1
@@ -148,11 +149,12 @@ async def test_wave_summary_when_all_terminal_already_applied(sqlite_db, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_idle_before_next_wave_logged(sqlite_db, monkeypatch) -> None:
-    info_events: list[str] = []
+async def test_poll_sleep_short_not_hourly_interval(sqlite_db, monkeypatch) -> None:
+    """Между волнами — короткий poll_sleep (секунды), не час."""
+    info_events: list[tuple[str, dict]] = []
 
     def capture_info(msg: str, **kw: object) -> None:
-        info_events.append(msg)
+        info_events.append((msg, dict(kw)))
 
     _mock_pipeline_log(monkeypatch, info_fn=capture_info)
 
@@ -177,15 +179,15 @@ async def test_idle_before_next_wave_logged(sqlite_db, monkeypatch) -> None:
 
         async def search_all(self, **_k):
             self._wave += 1
-            return [] if self._wave == 1 else []
+            return []
 
     monkeypatch.setattr("src.pipeline.HHClient", MockHH)
-    _cfg(monkeypatch, repeat_minutes=1.0 / 3600)
+    _cfg(monkeypatch, search_poll_interval_seconds=2)
 
     ev = asyncio.Event()
 
     async def stop_fast() -> None:
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.25)
         ev.set()
 
     asyncio.create_task(stop_fast())
@@ -201,8 +203,14 @@ async def test_idle_before_next_wave_logged(sqlite_db, monkeypatch) -> None:
         bot=None,
     )
 
-    assert "pipeline.idle.before_next_wave" in info_events
-    assert "pipeline.idle.wakeup" in info_events
+    poll_sleeps = [e for e in info_events if e[0] == "pipeline.poll_sleep"]
+    assert poll_sleeps, info_events
+    assert all(e[1]["sleep_seconds"] <= 60 for e in poll_sleeps)
+    assert all(e[1]["sleep_seconds"] == 2.0 for e in poll_sleeps)
+    assert not any(e[0] == "pipeline.idle.before_next_wave" for e in info_events)
+    assert any(e[0] == "pipeline.poll_wakeup" for e in info_events)
+    summaries = [e for e in info_events if e[0] == "pipeline.wave.summary"]
+    assert summaries[-1][1].get("next_action") == "poll_continue"
 
 
 @pytest.mark.asyncio
@@ -249,7 +257,7 @@ async def test_pipeline_search_crashed_after_wave_body(sqlite_db, monkeypatch) -
             return []
 
     monkeypatch.setattr("src.pipeline.HHClient", MockHH)
-    _cfg(monkeypatch, repeat_minutes=0)
+    _cfg(monkeypatch, search_poll_interval_seconds=0)
 
     with pytest.raises(RuntimeError, match="after_wave"):
         await run_user_pipeline(

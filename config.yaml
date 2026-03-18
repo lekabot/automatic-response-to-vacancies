@@ -27,6 +27,8 @@ hh:
     max_vacancies_per_run: 200
     # Дневной лимит откликов (hh.ru ограничивает ~200/день)
     daily_apply_limit: 200
+    # Пауза между проходами поиска (сек). Почасовой отчёт — отдельно, по слотам сессии.
+    search_poll_interval_seconds: 10
 
 storage:
   sqlite_path: "/data/bot.sqlite"

@@ -29,8 +29,10 @@ class SearchConfig(BaseModel):
     daily_apply_limit: int = 200
     # Поля для поиска: name = только заголовок (рекомендуется), описание включает шум
     search_field: list[str] = ["name"]
-    # Интервал между повторными поисками в минутах (0 = не повторять)
+    # Устарело: не влияет на частоту поиска (оставлено для совместимости YAML).
     repeat_interval_minutes: int = 60
+    # Пауза между проходами поиска HH (сек). 0 = одна волна и выход (тесты/отладка).
+    search_poll_interval_seconds: float = 30.0
     # Пайплайн: lease для IN_PROGRESS (мин), heartbeat каждые N вакансий, таймаут всего apply
     vacancy_lease_minutes: int = 10
     pipeline_heartbeat_every: int = 10

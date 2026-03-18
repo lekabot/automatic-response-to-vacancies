@@ -2,7 +2,7 @@
 Пайплайн поиска вакансий и автоматических откликов (изолированно по chat_id).
 
 Статусная модель: claim IN_PROGRESS → apply → финальный статус.
-Волны поиска в одном run_user_pipeline до лимита / стопа / пустого repeat=0.
+Непрерывный поиск до лимита / стопа; пауза между волнами — search_poll_interval_seconds.
 """
 from __future__ import annotations
 
@@ -190,80 +190,67 @@ async def _send_final_limit_report(
         chat_id=chat_id,
         final_report=True,
     )
+    log.info(
+        "pipeline.search.limit_reached",
+        chat_id=chat_id,
+        limit=daily_limit,
+    )
 
 
-async def _idle_between_waves(
+async def _poll_sleep_before_next_wave(
     bot: Any,
     chat_id: int,
     daily_limit: int,
     cancel_event: asyncio.Event,
     sleep_seconds: float,
     *,
-    repeat_interval_minutes: float,
+    reason: str,
     next_wave_number: int,
-    current_wave: int,
 ) -> bool:
-    """True если пользователь отменил. Логи idle + heartbeat."""
+    """Короткая пауза до следующей волны поиска. Почасовой отчёт — по слотам сессии, не по длине паузы."""
+    if sleep_seconds <= 0:
+        return False
     log.info(
-        "pipeline.idle.before_next_wave",
+        "pipeline.poll_sleep",
         chat_id=chat_id,
         sleep_seconds=round(sleep_seconds, 1),
-        repeat_interval_minutes=repeat_interval_minutes,
+        reason=reason,
         next_wave_number=next_wave_number,
-        current_wave=current_wave,
     )
     loop = asyncio.get_event_loop()
     deadline = loop.time() + sleep_seconds
-    last_hb = loop.time()
-    hb_interval = 60.0
     while True:
         if cancel_event.is_set():
             log.info(
-                "pipeline.idle.wakeup",
+                "pipeline.poll_wakeup",
                 chat_id=chat_id,
                 reason="user_cancel",
                 next_wave_number=next_wave_number,
             )
             return True
-        phase_hb = "hourly_report_check"
         try:
             await _maybe_send_hourly_report(bot, chat_id, daily_limit)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception(
-                "pipeline.idle.hourly_check_failed",
+                "pipeline.poll.hourly_check_failed",
                 chat_id=chat_id,
-                phase=phase_hb,
             )
         remaining = deadline - loop.time()
         if remaining <= 0:
             log.info(
-                "pipeline.idle.wakeup",
+                "pipeline.poll_wakeup",
                 chat_id=chat_id,
-                reason="sleep_complete",
+                reason="poll_complete",
                 next_wave_number=next_wave_number,
             )
             return False
-        now = loop.time()
-        if sleep_seconds > 30 and (now - last_hb) >= hb_interval:
-            us = await db.get_user_settings(chat_id)
-            session_active = bool(us and us.search_session_started_at is not None)
-            slot = us.last_hourly_report_slot if us else None
-            log.info(
-                "pipeline.idle.heartbeat",
-                chat_id=chat_id,
-                session_active=session_active,
-                seconds_remaining=round(max(0.0, remaining), 1),
-                current_wave=current_wave,
-                last_hourly_report_slot=slot,
-            )
-            last_hb = now
-        chunk = min(60.0, remaining)
+        chunk = min(15.0, remaining)
         try:
             await asyncio.wait_for(cancel_event.wait(), timeout=chunk)
             log.info(
-                "pipeline.idle.wakeup",
+                "pipeline.poll_wakeup",
                 chat_id=chat_id,
                 reason="user_cancel",
                 next_wave_number=next_wave_number,
@@ -277,15 +264,14 @@ def _wave_next_action(
     *,
     cancel: bool,
     stopped_limit: bool,
-    repeat_minutes: float,
-    collected_empty: bool,
+    continuous_search: bool,
 ) -> str:
     if stopped_limit:
         return "stop_limit"
     if cancel:
         return "stop_user"
-    if repeat_minutes > 0:
-        return "sleep"
+    if continuous_search:
+        return "poll_continue"
     return "complete"
 
 
@@ -315,7 +301,7 @@ async def run_user_pipeline(
     per_attempt = config.hh.search.apply_per_attempt_timeout_seconds
     retention = config.storage.retention_days
     daily_limit = config.hh.search.daily_apply_limit
-    repeat_minutes = float(config.hh.search.repeat_interval_minutes or 0)
+    poll_sec = max(0.0, float(config.hh.search.search_poll_interval_seconds))
 
     async def load_wave() -> tuple[str, list[str], str] | None:
         us = await db.get_user_settings(chat_id)
@@ -372,6 +358,12 @@ async def run_user_pipeline(
                 main_loop_ran = True
                 wave += 1
                 next_wave_num = wave + 1
+                if poll_sec > 0 and wave == 1:
+                    log.info(
+                        "pipeline.search.continuous_mode",
+                        chat_id=chat_id,
+                        search_poll_interval_seconds=poll_sec,
+                    )
                 log.info(
                     "pipeline.wave.start",
                     chat_id=chat_id,
@@ -759,8 +751,7 @@ async def run_user_pipeline(
                 next_action = _wave_next_action(
                     cancel=cancel,
                     stopped_limit=stopped,
-                    repeat_minutes=repeat_minutes,
-                    collected_empty=ws.collected_total == 0,
+                    continuous_search=poll_sec > 0,
                 )
                 if stopped:
                     next_action = "stop_limit"
@@ -813,40 +804,32 @@ async def run_user_pipeline(
                 if cancel or stopped:
                     break
 
-                if ws.collected_total == 0:
-                    if repeat_minutes > 0:
-                        phase = "sleep"
-                        cancelled = await _idle_between_waves(
-                            bot,
-                            chat_id,
-                            daily_limit,
-                            cancel_event,
-                            repeat_minutes * 60,
-                            repeat_interval_minutes=repeat_minutes,
-                            next_wave_number=next_wave_num,
-                            current_wave=wave,
-                        )
-                        if cancelled:
-                            break
-                        continue
+                if poll_sec <= 0:
                     break
 
-                if repeat_minutes > 0:
-                    phase = "sleep"
-                    cancelled = await _idle_between_waves(
-                        bot,
-                        chat_id,
-                        daily_limit,
-                        cancel_event,
-                        repeat_minutes * 60,
-                        repeat_interval_minutes=repeat_minutes,
-                        next_wave_number=next_wave_num,
-                        current_wave=wave,
+                if ws.collected_total == 0:
+                    log.info(
+                        "pipeline.search.no_new_vacancies",
+                        chat_id=chat_id,
+                        wave=wave,
                     )
-                    if cancelled:
-                        break
-                    continue
-                break
+                    poll_reason = "no_new_vacancies"
+                else:
+                    poll_reason = "wave_finished_continue"
+
+                phase = "poll_sleep"
+                cancelled = await _poll_sleep_before_next_wave(
+                    bot,
+                    chat_id,
+                    daily_limit,
+                    cancel_event,
+                    poll_sec,
+                    reason=poll_reason,
+                    next_wave_number=next_wave_num,
+                )
+                if cancelled:
+                    break
+                continue
 
     except asyncio.CancelledError:
         raise
