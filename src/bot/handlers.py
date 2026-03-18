@@ -586,25 +586,30 @@ async def edit_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def _search_task_done_callback(chat_id: int, user_data: dict) -> Any:
-    """Возвращает callback для asyncio.Task: лог + очистка search_task / cancel_event."""
+    """Callback Task: логи завершения + очистка user_data."""
 
     def _on_done(t: asyncio.Task) -> None:
         if user_data.get("search_task") is not t:
             return
         try:
             if t.cancelled():
-                log.info("search_task.finished", chat_id=chat_id, cancelled=True)
+                log.info("search_task.cancelled", chat_id=chat_id)
             else:
                 exc = t.exception()
                 if exc is not None:
-                    log.error(
-                        "search_task.finished",
+                    log.exception(
+                        "search_task.crashed",
                         chat_id=chat_id,
                         error=str(exc),
-                        exc_info=exc,
                     )
                 else:
                     log.info("search_task.finished", chat_id=chat_id, ok=True)
+        except BaseException as cb_exc:
+            log.exception(
+                "search_task.done_callback_failed",
+                chat_id=chat_id,
+                error=str(cb_exc),
+            )
         finally:
             user_data.pop("search_task", None)
             user_data.pop("cancel_event", None)
