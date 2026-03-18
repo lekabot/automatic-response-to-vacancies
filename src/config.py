@@ -31,6 +31,11 @@ class SearchConfig(BaseModel):
     search_field: list[str] = ["name"]
     # Интервал между повторными поисками в минутах (0 = не повторять)
     repeat_interval_minutes: int = 60
+    # Пайплайн: lease для IN_PROGRESS (мин), heartbeat каждые N вакансий, таймаут всего apply
+    vacancy_lease_minutes: int = 10
+    pipeline_heartbeat_every: int = 10
+    apply_total_timeout_seconds: float = 120.0
+    apply_per_attempt_timeout_seconds: float = 35.0
 
 
 class HHConfig(BaseModel):
@@ -44,9 +49,18 @@ class StorageConfig(BaseModel):
     retention_days: int = 30
 
 
+class DatabaseConfig(BaseModel):
+    """Не-SQLite: пул соединений. Для sqlite игнорируется."""
+
+    pool_size: int = 5
+    max_overflow: int = 10
+    pool_recycle_seconds: int = 3600
+
+
 class YamlConfig(BaseModel):
     hh: HHConfig = HHConfig()
     storage: StorageConfig = StorageConfig()
+    database: DatabaseConfig | None = None
 
 
 class EnvSettings(BaseSettings):
@@ -54,6 +68,7 @@ class EnvSettings(BaseSettings):
 
     telegram_bot_token: SecretStr
     config_path: str = "config.yaml"
+    database_url: str | None = None
 
 
 class AppConfig:
@@ -61,6 +76,7 @@ class AppConfig:
         self.env = env
         self.hh = yaml_cfg.hh
         self.storage = yaml_cfg.storage
+        self.database = yaml_cfg.database
 
     @property
     def bot_token(self) -> str:
@@ -68,6 +84,8 @@ class AppConfig:
 
     @property
     def db_url(self) -> str:
+        if self.env.database_url and self.env.database_url.strip():
+            return self.env.database_url.strip()
         return f"sqlite+aiosqlite:///{self.storage.sqlite_path}"
 
 

@@ -262,6 +262,40 @@ pytest -v
 - `test_pipeline.py` — фильтрация по `exclude_keywords`, `has_test`, `salary_text`, `apply_url`
 - `test_formatters.py` — форматирование карточек, summary, HTML-экранирование
 
+### Интеграционные тесты (реальный hh.ru)
+
+Тесты в `tests/integration/` ходят в реальный hh.ru и могут откликаться на вакансию. **Запускаются только при явной передаче переменных окружения** — в CI по умолчанию пропускаются.
+
+**Локальный запуск:**
+
+1. Получи данные из своей БД (или после одного успешного входа в боте):
+   - `hhtoken` — сессионный cookie после OTP-входа
+   - `resume_id` — ID резюме (без `?hhtmFrom=...`)
+   - `vacancy_id` — любая вакансия для тестового отклика (например из «Не удалось откликнуться»)
+
+2. Запусти тесты:
+
+```bash
+# Активируй venv
+source .venv/bin/activate   # Linux/macOS
+# или: .venv\Scripts\activate  # Windows
+
+# Одинарные кавычки обязательны, если в токене есть символ !
+HH_TOKEN='твой_hhtoken' HH_RESUME_ID=твой_resume_id HH_VACANCY_ID=id_вакансии pytest tests/integration/ -v -m integration
+
+# Или через export (удобно для нескольких запусков)
+export HH_TOKEN='твой_hhtoken'
+export HH_RESUME_ID=твой_resume_id
+export HH_VACANCY_ID=131089691
+pytest tests/integration/ -v -m integration
+```
+
+Если переменные не заданы — тесты будут **пропущены** (skip), а не упадут. Чтобы не запускать их вообще (только юнит-тесты), используй:
+
+```bash
+pytest -m "not integration" -v
+```
+
 ---
 
 ## Технологии

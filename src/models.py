@@ -1,11 +1,11 @@
-"""SQLAlchemy ORM models."""
+"""SQLAlchemy ORM models — vacancy processing state machine (per Telegram user)."""
 from __future__ import annotations
 
 import enum
 import json
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String, Text, func
+from sqlalchemy import DateTime, Enum, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -14,28 +14,51 @@ class Base(DeclarativeBase):
 
 
 class VacancyStatus(str, enum.Enum):
-    APPLIED = "APPLIED"                    # Новый отклик, отправлен в этой сессии
-    ALREADY_APPLIED = "ALREADY_APPLIED"    # hh.ru: уже откликались ранее — не считаем
-    APPLY_FAILED = "APPLY_FAILED"          # API вернул ошибку — можно откликнуться вручную
-    SKIPPED = "SKIPPED"                    # Отфильтровано по exclude_keywords
-    REQUIRES_TEST = "REQUIRES_TEST"        # Вакансия с тестом — пропускаем
+    """Конечный автомат обработки вакансии в пайплайне."""
+
+    IN_PROGRESS = "IN_PROGRESS"
+    APPLIED = "APPLIED"
+    ALREADY_APPLIED = "ALREADY_APPLIED"
+    SKIPPED = "SKIPPED"
+    REQUIRES_TEST = "REQUIRES_TEST"
+    APPLY_TIMEOUT = "APPLY_TIMEOUT"
+    APPLY_TEMP_ERROR = "APPLY_TEMP_ERROR"
+    APPLY_PERM_ERROR = "APPLY_PERM_ERROR"
 
 
 class VacancySeen(Base):
-    """Каждая вакансия, которую бот обработал."""
+    """
+    Вакансия, обработанная пайплайном для конкретного chat_id (Telegram).
+    Составной PK: один и тот же vacancy_id у разных пользователей — разные строки.
+    """
 
     __tablename__ = "vacancies_seen"
+    __table_args__ = (
+        Index("ix_vacancies_seen_chat_status", "chat_id", "status"),
+        Index("ix_vacancies_seen_chat_seen_at", "chat_id", "seen_at"),
+        Index("ix_vacancies_seen_chat_next_retry", "chat_id", "next_retry_at"),
+        Index("ix_vacancies_seen_chat_processing", "chat_id", "processing_started_at"),
+    )
 
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     vacancy_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     employer: Mapped[str] = mapped_column(Text, default="")
     url: Mapped[str] = mapped_column(Text, default="")
     salary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[VacancyStatus] = mapped_column(
-        Enum(VacancyStatus), nullable=False
+        Enum(VacancyStatus, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
     )
     seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

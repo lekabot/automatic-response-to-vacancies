@@ -9,6 +9,7 @@ def esc(text: str) -> str:
 def format_hourly_summary(stats: dict, daily_limit: int) -> str:
     applied = stats["applied"]
     failed = stats["failed"]
+    retry_later = stats.get("retry_later", 0)
     skipped = stats["skipped"]
     requires_test = stats["requires_test"]
     pct = int(applied / daily_limit * 100) if daily_limit else 0
@@ -16,7 +17,8 @@ def format_hourly_summary(stats: dict, daily_limit: int) -> str:
     return (
         "📊 <b>Почасовой отчёт</b>\n\n"
         f"✅ Откликнулся: <b>{applied}</b> / {daily_limit} ({pct}%)\n"
-        f"⚠️ Не удалось откликнуться: <b>{failed}</b>\n"
+        f"⚠️ Ошибка отклика (вручную): <b>{failed}</b>\n"
+        f"🔁 Отложено (сеть/таймаут): <b>{retry_later}</b>\n"
         f"🧪 С тестом (пропущено): <b>{requires_test}</b>\n"
         f"🚫 Отфильтровано: <b>{skipped}</b>"
     )

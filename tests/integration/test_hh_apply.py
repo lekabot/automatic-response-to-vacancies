@@ -17,6 +17,7 @@ import os
 
 import pytest
 
+from src.hh.apply_types import ApplyStatus
 from src.hh.client import HHClient
 
 HH_TOKEN = os.getenv("HH_TOKEN", "")
@@ -82,15 +83,15 @@ async def test_resume_id_has_no_query_string(hh_client: HHClient) -> None:
 async def test_apply_without_letter(hh_client: HHClient) -> None:
     """Откликаемся через /applicant/vacancy_response/popup БЕЗ письма."""
     _require_env()
-    ok = await hh_client.apply(
+    out = await hh_client.apply(
         vacancy_id=HH_VACANCY_ID,
         resume_id=HH_RESUME_ID,
         letter="",
     )
-    print(f"\napply without letter: ok={ok}")
-    assert ok, (
+    print(f"\napply without letter: status={out.status}")
+    assert out.status == ApplyStatus.APPLIED, (
         f"Отклик не прошёл (vacancy={HH_VACANCY_ID!r}, resume={HH_RESUME_ID!r}). "
-        "Проверьте логи hh.apply.failed/hh.apply.result."
+        "Проверьте логи hh.apply.*"
     )
 
 
@@ -104,10 +105,12 @@ async def test_apply_with_cover_letter(hh_client: HHClient) -> None:
         "Я опытный разработчик и готов обсудить сотрудничество.\n\n"
         "С уважением."
     )
-    ok = await hh_client.apply(
+    out = await hh_client.apply(
         vacancy_id=HH_VACANCY_ID,
         resume_id=HH_RESUME_ID,
         letter=letter,
     )
-    print(f"\napply with cover letter: ok={ok}")
-    assert ok, "Отклик с письмом не прошёл. Смотрите логи hh.apply.failed/hh.apply.result."
+    print(f"\napply with cover letter: status={out.status}")
+    assert out.status == ApplyStatus.APPLIED, (
+        "Отклик с письмом не прошёл. Смотрите логи hh.apply.*"
+    )

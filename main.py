@@ -44,9 +44,18 @@ async def _run() -> None:
 
     config = get_config()
 
-    Path(config.storage.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    db.init_db(config.db_url)
-    _run_migrations(config.storage.sqlite_path)
+    if "sqlite" in config.db_url.lower():
+        Path(config.storage.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+        _run_migrations(config.storage.sqlite_path)
+        db.init_db(config.db_url)
+    else:
+        dc = config.database
+        db.init_db(
+            config.db_url,
+            pool_size=dc.pool_size if dc else 5,
+            max_overflow=dc.max_overflow if dc else 10,
+            pool_recycle_seconds=dc.pool_recycle_seconds if dc else 3600,
+        )
 
     log.info("bot.starting")
     app = build_application(config)
