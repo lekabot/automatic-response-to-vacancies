@@ -32,7 +32,9 @@ class SearchConfig(BaseModel):
     # Устарело: не влияет на частоту поиска (оставлено для совместимости YAML).
     repeat_interval_minutes: int = 60
     # Пауза между проходами поиска HH (сек). 0 = одна волна и выход (тесты/отладка).
-    search_poll_interval_seconds: float = 30.0
+    search_poll_interval_seconds: float = 10.0
+    search_poll_interval_max_seconds: float = 300.0
+    same_result_backoff_enabled: bool = True
     # Пайплайн: lease для IN_PROGRESS (мин), heartbeat каждые N вакансий, таймаут всего apply
     vacancy_lease_minutes: int = 10
     pipeline_heartbeat_every: int = 10

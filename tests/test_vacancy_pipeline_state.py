@@ -52,6 +52,8 @@ def _mock_pipeline_config(monkeypatch, *, daily_limit: int = 500) -> None:
             apply_per_attempt_timeout_seconds=10.0,
             repeat_interval_minutes=60,
             search_poll_interval_seconds=0,
+            search_poll_interval_max_seconds=300.0,
+            same_result_backoff_enabled=True,
         ),
     )
     cfg.storage = SimpleNamespace(retention_days=30)

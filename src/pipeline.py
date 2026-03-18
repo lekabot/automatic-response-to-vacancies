@@ -275,6 +275,47 @@ def _wave_next_action(
     return "complete"
 
 
+# Множители к base: 10s → 20, 30, 60, …; при base=0.02 тесты остаются быстрыми.
+_POLL_BACKOFF_MULTS: tuple[float, ...] = (2.0, 3.0, 6.0, 12.0, 18.0, 24.0, 30.0)
+
+
+def _compute_poll_sleep_seconds(
+    base: float,
+    max_sec: float,
+    backoff_enabled: bool,
+    consecutive_same_no_action: int,
+) -> float:
+    if base <= 0:
+        return 0.0
+    cap = max_sec if max_sec > 0 else base
+    if not backoff_enabled or consecutive_same_no_action < 2:
+        return min(base, cap)
+    idx = min(consecutive_same_no_action - 2, len(_POLL_BACKOFF_MULTS) - 1)
+    tier = base * _POLL_BACKOFF_MULTS[idx]
+    return min(cap, max(base, tier))
+
+
+def _fingerprint_vacancies(vacancies: list[VacancySchema]) -> tuple[str, ...]:
+    return tuple(sorted(v.id for v in vacancies))
+
+
+def _any_claimable_in_wave(
+    vacancies: list[VacancySchema],
+    exclude_keywords: list[str],
+    peek: dict[str, tuple[str, str | None]],
+) -> bool:
+    """Есть ли вакансия, по которой не exclude/test и клейм не чисто terminal."""
+    for v in vacancies:
+        if v.matches_exclude(exclude_keywords):
+            continue
+        if v.has_test:
+            continue
+        path, _st = peek.get(v.id, ("claimable", None))
+        if path != "terminal":
+            return True
+    return False
+
+
 async def run_user_pipeline(
     *,
     chat_id: int,
@@ -302,6 +343,12 @@ async def run_user_pipeline(
     retention = config.storage.retention_days
     daily_limit = config.hh.search.daily_apply_limit
     poll_sec = max(0.0, float(config.hh.search.search_poll_interval_seconds))
+    poll_max = max(0.0, float(getattr(config.hh.search, "search_poll_interval_max_seconds", 300.0)))
+    backoff_enabled = bool(getattr(config.hh.search, "same_result_backoff_enabled", True))
+    last_fp: tuple[str, ...] | None = None
+    prev_wave_terminal_idle = False
+    consecutive_same_no_action = 0
+    last_poll_sleep_used = poll_sec
 
     async def load_wave() -> tuple[str, list[str], str] | None:
         us = await db.get_user_settings(chat_id)
@@ -404,6 +451,92 @@ async def run_user_pipeline(
                 rid, kws, cletter = loaded
 
                 vacancies = await _collect_vacancies(hh, kws, config)
+                fp = _fingerprint_vacancies(vacancies)
+                peek: dict[str, tuple[str, str | None]] = {}
+                if fp:
+                    peek = await db.batch_peek_claim_paths(
+                        chat_id,
+                        list(fp),
+                        retention_days=retention,
+                        lease_minutes=lease_min,
+                    )
+                any_claim = (
+                    _any_claimable_in_wave(
+                        vacancies, config.hh.search.exclude_keywords, peek
+                    )
+                    if vacancies
+                    else False
+                )
+                no_actionable = len(vacancies) == 0 or not any_claim
+                same_fp = last_fp is not None and fp == last_fp
+                if fp == last_fp and no_actionable:
+                    consecutive_same_no_action += 1
+                elif no_actionable:
+                    consecutive_same_no_action = 1
+                else:
+                    consecutive_same_no_action = 0
+
+                next_poll_sleep = _compute_poll_sleep_seconds(
+                    poll_sec, poll_max, backoff_enabled, consecutive_same_no_action
+                )
+                if (
+                    backoff_enabled
+                    and next_poll_sleep > last_poll_sleep_used + 0.5
+                    and consecutive_same_no_action >= 2
+                ):
+                    log.info(
+                        "pipeline.poll_backoff.increased",
+                        chat_id=chat_id,
+                        wave=wave,
+                        old_sleep_seconds=round(last_poll_sleep_used, 2),
+                        new_sleep_seconds=round(next_poll_sleep, 2),
+                        consecutive_same_result_sets=consecutive_same_no_action,
+                        consecutive_no_actionable_waves=consecutive_same_no_action,
+                        fingerprint_size=len(fp),
+                        vacancy_count=len(fp),
+                    )
+                if (
+                    backoff_enabled
+                    and next_poll_sleep + 0.5 < last_poll_sleep_used
+                    and last_poll_sleep_used > poll_sec + 0.5
+                ):
+                    log.info(
+                        "pipeline.poll_backoff.reset",
+                        chat_id=chat_id,
+                        wave=wave,
+                        old_sleep_seconds=round(last_poll_sleep_used, 2),
+                        new_sleep_seconds=round(next_poll_sleep, 2),
+                        consecutive_same_result_sets=consecutive_same_no_action,
+                        consecutive_no_actionable_waves=consecutive_same_no_action,
+                    )
+
+                if same_fp and len(fp) > 0:
+                    log.info(
+                        "pipeline.wave.same_result_set_detected",
+                        chat_id=chat_id,
+                        wave=wave,
+                        vacancy_count=len(fp),
+                        fingerprint_size=len(fp),
+                        consecutive_same_result_sets=consecutive_same_no_action,
+                        consecutive_no_actionable_waves=consecutive_same_no_action,
+                    )
+
+                short_circuit = (
+                    prev_wave_terminal_idle
+                    and same_fp
+                    and len(fp) > 0
+                    and no_actionable
+                )
+                if short_circuit:
+                    log.info(
+                        "pipeline.wave.short_circuited_terminal_repeat",
+                        chat_id=chat_id,
+                        wave=wave,
+                        collected_total=len(vacancies),
+                        consecutive_same_result_sets=consecutive_same_no_action,
+                        fingerprint_size=len(fp),
+                    )
+
                 ws = WaveStats()
                 ws.collected_total = len(vacancies)
                 total_list = ws.collected_total
@@ -412,6 +545,7 @@ async def run_user_pipeline(
                     total=total_list,
                     chat_id=chat_id,
                     wave=wave,
+                    short_circuited=short_circuit,
                 )
 
                 phase = "process_vacancies"
@@ -419,202 +553,249 @@ async def run_user_pipeline(
                 run_applied = 0
                 run_failed_perm = 0
 
-                for idx, vacancy in enumerate(vacancies):
-                    if cancel_event.is_set():
-                        break
+                if short_circuit:
+                    for v in vacancies:
+                        if v.matches_exclude(config.hh.search.exclude_keywords):
+                            ws.skipped_exclude += 1
+                        elif v.has_test:
+                            ws.skipped_requires_test += 1
+                        else:
+                            _pt, stv = peek.get(v.id, ("terminal", None))
+                            ws.record_terminal_skip(stv or "UNKNOWN")
+                else:
+                    for idx, vacancy in enumerate(vacancies):
+                        if cancel_event.is_set():
+                            break
 
-                    today_count = await db.get_applied_today_count(chat_id)
-                    if today_count >= daily_limit:
-                        phase = "finalize"
-                        await _send_final_limit_report(
-                            bot, chat_id, daily_limit, final_sent=final_sent, result=result
-                        )
-                        break
-
-                    phase = "hourly_report_check"
-                    await _maybe_send_hourly_report(bot, chat_id, daily_limit)
-                    phase = "process_vacancies"
-                    if cancel_event.is_set():
-                        break
-                    if result["stopped_by_limit"]:
-                        break
-
-                    if vacancy.matches_exclude(config.hh.search.exclude_keywords):
-                        ws.skipped_exclude += 1
-                        await db.upsert_vacancy_skip_or_test(
-                            chat_id=chat_id,
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            employer=vacancy.employer.name,
-                            url=vacancy.vacancy_url,
-                            salary_text=vacancy.salary_text,
-                            status=VacancyStatus.SKIPPED,
-                        )
-                        processed += 1
-                        if processed % heartbeat_n == 0:
-                            _heartbeat(
-                                chat_id=chat_id,
-                                processed=processed,
-                                applied=run_applied,
-                                failed=run_failed_perm,
-                                remaining=max(0, total_list - idx - 1),
+                        today_count = await db.get_applied_today_count(chat_id)
+                        if today_count >= daily_limit:
+                            phase = "finalize"
+                            await _send_final_limit_report(
+                                bot, chat_id, daily_limit, final_sent=final_sent, result=result
                             )
-                        await asyncio.sleep(0.5)
-                        continue
+                            break
 
-                    if vacancy.has_test:
-                        ws.skipped_requires_test += 1
-                        await db.upsert_vacancy_skip_or_test(
-                            chat_id=chat_id,
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            employer=vacancy.employer.name,
-                            url=vacancy.vacancy_url,
-                            salary_text=vacancy.salary_text,
-                            status=VacancyStatus.REQUIRES_TEST,
-                        )
-                        processed += 1
-                        if processed % heartbeat_n == 0:
-                            _heartbeat(
+                        phase = "hourly_report_check"
+                        await _maybe_send_hourly_report(bot, chat_id, daily_limit)
+                        phase = "process_vacancies"
+                        if cancel_event.is_set():
+                            break
+                        if result["stopped_by_limit"]:
+                            break
+
+                        if vacancy.matches_exclude(config.hh.search.exclude_keywords):
+                            ws.skipped_exclude += 1
+                            await db.upsert_vacancy_skip_or_test(
                                 chat_id=chat_id,
-                                processed=processed,
-                                applied=run_applied,
-                                failed=run_failed_perm,
-                                remaining=max(0, total_list - idx - 1),
-                            )
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    claim = await db.try_claim_vacancy_for_processing(
-                        chat_id=chat_id,
-                        vacancy_id=vacancy.id,
-                        title=vacancy.name,
-                        employer=vacancy.employer.name,
-                        url=vacancy.vacancy_url,
-                        salary_text=vacancy.salary_text,
-                        retention_days=retention,
-                        lease_minutes=lease_min,
-                    )
-                    attempt_count = claim.attempt_count
-                    _nr = (
-                        claim.next_retry_at.isoformat()
-                        if claim.next_retry_at is not None
-                        else None
-                    )
-                    _st = claim.current_status.value if claim.current_status is not None else None
-
-                    if claim.reason == ClaimReason.SKIP_TERMINAL:
-                        if _st:
-                            ws.record_terminal_skip(_st)
-                        log.info(
-                            "pipeline.vacancy.skipped_terminal",
-                            chat_id=chat_id,
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            attempt_count=attempt_count,
-                            current_status=_st,
-                            next_retry_at=_nr,
-                        )
-                        processed += 1
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    if claim.reason == ClaimReason.SKIP_BACKOFF:
-                        ws.skipped_backoff += 1
-                        log.info(
-                            "pipeline.vacancy.skipped_due_to_backoff",
-                            chat_id=chat_id,
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            attempt_count=attempt_count,
-                            current_status=_st,
-                            next_retry_at=_nr,
-                        )
-                        processed += 1
-                        if processed % heartbeat_n == 0:
-                            _heartbeat(
-                                chat_id=chat_id,
-                                processed=processed,
-                                applied=run_applied,
-                                failed=run_failed_perm,
-                                remaining=max(0, total_list - idx - 1),
-                            )
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    if claim.reason == ClaimReason.SKIP_IN_PROGRESS:
-                        ws.skipped_in_progress += 1
-                        log.info(
-                            "pipeline.vacancy.skipped_in_progress",
-                            chat_id=chat_id,
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            attempt_count=attempt_count,
-                            current_status=_st,
-                            next_retry_at=_nr,
-                        )
-                        processed += 1
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    log.info(
-                        "pipeline.vacancy.claimed",
-                        chat_id=chat_id,
-                        vacancy_id=vacancy.id,
-                        title=vacancy.name,
-                        attempt_count=attempt_count,
-                        current_status=_st,
-                        next_retry_at=_nr,
-                    )
-                    log.info(
-                        "pipeline.vacancy.start",
-                        vacancy_id=vacancy.id,
-                        title=vacancy.name,
-                        chat_id=chat_id,
-                        status=VacancyStatus.IN_PROGRESS.value,
-                        attempt_count=attempt_count,
-                    )
-
-                    letter = render_cover_letter(
-                        cletter,
-                        title=vacancy.name,
-                        employer=vacancy.employer.name,
-                    )
-
-                    ws.apply_attempted += 1
-                    outcome: ApplyStatus | None = None
-                    final_status = VacancyStatus.APPLY_PERM_ERROR
-                    last_err: str | None = None
-                    next_retry = None
-                    retryable_flag = False
-                    http_st: int | None = None
-
-                    try:
-                        apply_out = await asyncio.wait_for(
-                            hh.apply(
                                 vacancy_id=vacancy.id,
-                                resume_id=rid,
-                                letter=letter,
-                                per_attempt_timeout=per_attempt,
-                            ),
-                            timeout=apply_total,
-                        )
-                        outcome = apply_out.status
-                        http_st = apply_out.http_status
-                        retryable_flag = apply_out.retryable
-                        last_err = apply_out.error_message or apply_out.error_code
+                                title=vacancy.name,
+                                employer=vacancy.employer.name,
+                                url=vacancy.vacancy_url,
+                                salary_text=vacancy.salary_text,
+                                status=VacancyStatus.SKIPPED,
+                            )
+                            processed += 1
+                            if processed % heartbeat_n == 0:
+                                _heartbeat(
+                                    chat_id=chat_id,
+                                    processed=processed,
+                                    applied=run_applied,
+                                    failed=run_failed_perm,
+                                    remaining=max(0, total_list - idx - 1),
+                                )
+                            await asyncio.sleep(0.5)
+                            continue
 
-                        if apply_out.status == ApplyStatus.APPLIED:
-                            final_status = VacancyStatus.APPLIED
-                            ws.apply_success += 1
-                            run_applied += 1
-                            result["applied"] += 1
-                        elif apply_out.status == ApplyStatus.ALREADY_APPLIED:
-                            final_status = VacancyStatus.ALREADY_APPLIED
-                            ws.apply_already_applied += 1
-                        elif apply_out.status == ApplyStatus.TIMEOUT:
-                            final_status = VacancyStatus.APPLY_TIMEOUT
+                        if vacancy.has_test:
+                            ws.skipped_requires_test += 1
+                            await db.upsert_vacancy_skip_or_test(
+                                chat_id=chat_id,
+                                vacancy_id=vacancy.id,
+                                title=vacancy.name,
+                                employer=vacancy.employer.name,
+                                url=vacancy.vacancy_url,
+                                salary_text=vacancy.salary_text,
+                                status=VacancyStatus.REQUIRES_TEST,
+                            )
+                            processed += 1
+                            if processed % heartbeat_n == 0:
+                                _heartbeat(
+                                    chat_id=chat_id,
+                                    processed=processed,
+                                    applied=run_applied,
+                                    failed=run_failed_perm,
+                                    remaining=max(0, total_list - idx - 1),
+                                )
+                            await asyncio.sleep(0.5)
+                            continue
+
+                        claim = await db.try_claim_vacancy_for_processing(
+                            chat_id=chat_id,
+                            vacancy_id=vacancy.id,
+                            title=vacancy.name,
+                            employer=vacancy.employer.name,
+                            url=vacancy.vacancy_url,
+                            salary_text=vacancy.salary_text,
+                            retention_days=retention,
+                            lease_minutes=lease_min,
+                        )
+                        attempt_count = claim.attempt_count
+                        _nr = (
+                            claim.next_retry_at.isoformat()
+                            if claim.next_retry_at is not None
+                            else None
+                        )
+                        _st = claim.current_status.value if claim.current_status is not None else None
+
+                        if claim.reason == ClaimReason.SKIP_TERMINAL:
+                            if _st:
+                                ws.record_terminal_skip(_st)
+                            log.info(
+                                "pipeline.vacancy.skipped_terminal",
+                                chat_id=chat_id,
+                                vacancy_id=vacancy.id,
+                                title=vacancy.name,
+                                attempt_count=attempt_count,
+                                current_status=_st,
+                                next_retry_at=_nr,
+                            )
+                            processed += 1
+                            await asyncio.sleep(0.5)
+                            continue
+
+                        if claim.reason == ClaimReason.SKIP_BACKOFF:
+                            ws.skipped_backoff += 1
+                            log.info(
+                                "pipeline.vacancy.skipped_due_to_backoff",
+                                chat_id=chat_id,
+                                vacancy_id=vacancy.id,
+                                title=vacancy.name,
+                                attempt_count=attempt_count,
+                                current_status=_st,
+                                next_retry_at=_nr,
+                            )
+                            processed += 1
+                            if processed % heartbeat_n == 0:
+                                _heartbeat(
+                                    chat_id=chat_id,
+                                    processed=processed,
+                                    applied=run_applied,
+                                    failed=run_failed_perm,
+                                    remaining=max(0, total_list - idx - 1),
+                                )
+                            await asyncio.sleep(0.5)
+                            continue
+
+                        if claim.reason == ClaimReason.SKIP_IN_PROGRESS:
+                            ws.skipped_in_progress += 1
+                            log.info(
+                                "pipeline.vacancy.skipped_in_progress",
+                                chat_id=chat_id,
+                                vacancy_id=vacancy.id,
+                                title=vacancy.name,
+                                attempt_count=attempt_count,
+                                current_status=_st,
+                                next_retry_at=_nr,
+                            )
+                            processed += 1
+                            await asyncio.sleep(0.5)
+                            continue
+
+                        log.info(
+                            "pipeline.vacancy.claimed",
+                            chat_id=chat_id,
+                            vacancy_id=vacancy.id,
+                            title=vacancy.name,
+                            attempt_count=attempt_count,
+                            current_status=_st,
+                            next_retry_at=_nr,
+                        )
+                        log.info(
+                            "pipeline.vacancy.start",
+                            vacancy_id=vacancy.id,
+                            title=vacancy.name,
+                            chat_id=chat_id,
+                            status=VacancyStatus.IN_PROGRESS.value,
+                            attempt_count=attempt_count,
+                        )
+
+                        letter = render_cover_letter(
+                            cletter,
+                            title=vacancy.name,
+                            employer=vacancy.employer.name,
+                        )
+
+                        ws.apply_attempted += 1
+                        outcome: ApplyStatus | None = None
+                        final_status = VacancyStatus.APPLY_PERM_ERROR
+                        last_err: str | None = None
+                        next_retry = None
+                        retryable_flag = False
+                        http_st: int | None = None
+
+                        try:
+                            apply_out = await asyncio.wait_for(
+                                hh.apply(
+                                    vacancy_id=vacancy.id,
+                                    resume_id=rid,
+                                    letter=letter,
+                                    per_attempt_timeout=per_attempt,
+                                ),
+                                timeout=apply_total,
+                            )
+                            outcome = apply_out.status
+                            http_st = apply_out.http_status
+                            retryable_flag = apply_out.retryable
+                            last_err = apply_out.error_message or apply_out.error_code
+
+                            if apply_out.status == ApplyStatus.APPLIED:
+                                final_status = VacancyStatus.APPLIED
+                                ws.apply_success += 1
+                                run_applied += 1
+                                result["applied"] += 1
+                            elif apply_out.status == ApplyStatus.ALREADY_APPLIED:
+                                final_status = VacancyStatus.ALREADY_APPLIED
+                                ws.apply_already_applied += 1
+                            elif apply_out.status == ApplyStatus.TIMEOUT:
+                                final_status = VacancyStatus.APPLY_TIMEOUT
+                                ws.apply_timeout += 1
+                                next_retry = db.compute_next_retry_at(attempt_count)
+                                log.warning(
+                                    "pipeline.vacancy.timeout",
+                                    vacancy_id=vacancy.id,
+                                    title=vacancy.name,
+                                    chat_id=chat_id,
+                                    attempt_count=attempt_count,
+                                    http_status=http_st,
+                                )
+                                log.info(
+                                    "pipeline.vacancy.retry_scheduled",
+                                    vacancy_id=vacancy.id,
+                                    chat_id=chat_id,
+                                    next_retry_at=next_retry.isoformat(),
+                                    status=final_status.value,
+                                )
+                            elif apply_out.status == ApplyStatus.TEMP_ERROR:
+                                final_status = VacancyStatus.APPLY_TEMP_ERROR
+                                ws.apply_temp_error += 1
+                                next_retry = db.compute_next_retry_at(attempt_count)
+                                log.info(
+                                    "pipeline.vacancy.retry_scheduled",
+                                    vacancy_id=vacancy.id,
+                                    chat_id=chat_id,
+                                    next_retry_at=next_retry.isoformat(),
+                                    retryable=True,
+                                    http_status=http_st,
+                                )
+                            else:
+                                final_status = VacancyStatus.APPLY_PERM_ERROR
+                                ws.apply_perm_error += 1
+                                run_failed_perm += 1
+
+                        except asyncio.TimeoutError:
                             ws.apply_timeout += 1
+                            final_status = VacancyStatus.APPLY_TIMEOUT
+                            last_err = f"pipeline_wait_for_{apply_total}s"
                             next_retry = db.compute_next_retry_at(attempt_count)
                             log.warning(
                                 "pipeline.vacancy.timeout",
@@ -622,7 +803,7 @@ async def run_user_pipeline(
                                 title=vacancy.name,
                                 chat_id=chat_id,
                                 attempt_count=attempt_count,
-                                http_status=http_st,
+                                http_status=None,
                             )
                             log.info(
                                 "pipeline.vacancy.retry_scheduled",
@@ -631,110 +812,73 @@ async def run_user_pipeline(
                                 next_retry_at=next_retry.isoformat(),
                                 status=final_status.value,
                             )
-                        elif apply_out.status == ApplyStatus.TEMP_ERROR:
-                            final_status = VacancyStatus.APPLY_TEMP_ERROR
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
                             ws.apply_temp_error += 1
+                            final_status = VacancyStatus.APPLY_TEMP_ERROR
+                            last_err = str(exc)
                             next_retry = db.compute_next_retry_at(attempt_count)
+                            log.exception(
+                                "pipeline.vacancy.error",
+                                vacancy_id=vacancy.id,
+                                title=vacancy.name,
+                                chat_id=chat_id,
+                                error=str(exc),
+                            )
                             log.info(
                                 "pipeline.vacancy.retry_scheduled",
                                 vacancy_id=vacancy.id,
                                 chat_id=chat_id,
                                 next_retry_at=next_retry.isoformat(),
-                                retryable=True,
-                                http_status=http_st,
+                                status=final_status.value,
                             )
-                        else:
-                            final_status = VacancyStatus.APPLY_PERM_ERROR
-                            ws.apply_perm_error += 1
-                            run_failed_perm += 1
 
-                    except asyncio.TimeoutError:
-                        ws.apply_timeout += 1
-                        final_status = VacancyStatus.APPLY_TIMEOUT
-                        last_err = f"pipeline_wait_for_{apply_total}s"
-                        next_retry = db.compute_next_retry_at(attempt_count)
-                        log.warning(
-                            "pipeline.vacancy.timeout",
+                        await db.persist_terminal_vacancy(
+                            chat_id=chat_id,
+                            vacancy_id=vacancy.id,
+                            status=final_status,
+                            last_error=last_err,
+                            next_retry_at=next_retry,
+                        )
+
+                        log.info(
+                            "pipeline.vacancy.finish",
                             vacancy_id=vacancy.id,
                             title=vacancy.name,
                             chat_id=chat_id,
+                            status=final_status.value,
                             attempt_count=attempt_count,
-                            http_status=None,
-                        )
-                        log.info(
-                            "pipeline.vacancy.retry_scheduled",
-                            vacancy_id=vacancy.id,
-                            chat_id=chat_id,
-                            next_retry_at=next_retry.isoformat(),
-                            status=final_status.value,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        ws.apply_temp_error += 1
-                        final_status = VacancyStatus.APPLY_TEMP_ERROR
-                        last_err = str(exc)
-                        next_retry = db.compute_next_retry_at(attempt_count)
-                        log.exception(
-                            "pipeline.vacancy.error",
-                            vacancy_id=vacancy.id,
-                            title=vacancy.name,
-                            chat_id=chat_id,
-                            error=str(exc),
-                        )
-                        log.info(
-                            "pipeline.vacancy.retry_scheduled",
-                            vacancy_id=vacancy.id,
-                            chat_id=chat_id,
-                            next_retry_at=next_retry.isoformat(),
-                            status=final_status.value,
+                            retryable=retryable_flag,
+                            next_retry_at=next_retry.isoformat() if next_retry else None,
+                            http_status=http_st,
+                            outcome=outcome.value if outcome else None,
                         )
 
-                    await db.persist_terminal_vacancy(
-                        chat_id=chat_id,
-                        vacancy_id=vacancy.id,
-                        status=final_status,
-                        last_error=last_err,
-                        next_retry_at=next_retry,
-                    )
+                        if outcome == ApplyStatus.APPLIED:
+                            tc = await db.get_applied_today_count(chat_id)
+                            if tc >= daily_limit:
+                                phase = "finalize"
+                                await _send_final_limit_report(
+                                    bot,
+                                    chat_id,
+                                    daily_limit,
+                                    final_sent=final_sent,
+                                    result=result,
+                                )
+                                break
 
-                    log.info(
-                        "pipeline.vacancy.finish",
-                        vacancy_id=vacancy.id,
-                        title=vacancy.name,
-                        chat_id=chat_id,
-                        status=final_status.value,
-                        attempt_count=attempt_count,
-                        retryable=retryable_flag,
-                        next_retry_at=next_retry.isoformat() if next_retry else None,
-                        http_status=http_st,
-                        outcome=outcome.value if outcome else None,
-                    )
-
-                    if outcome == ApplyStatus.APPLIED:
-                        tc = await db.get_applied_today_count(chat_id)
-                        if tc >= daily_limit:
-                            phase = "finalize"
-                            await _send_final_limit_report(
-                                bot,
-                                chat_id,
-                                daily_limit,
-                                final_sent=final_sent,
-                                result=result,
+                        processed += 1
+                        if processed % heartbeat_n == 0:
+                            _heartbeat(
+                                chat_id=chat_id,
+                                processed=processed,
+                                applied=run_applied,
+                                failed=run_failed_perm,
+                                remaining=max(0, total_list - idx - 1),
                             )
-                            break
 
-                    processed += 1
-                    if processed % heartbeat_n == 0:
-                        _heartbeat(
-                            chat_id=chat_id,
-                            processed=processed,
-                            applied=run_applied,
-                            failed=run_failed_perm,
-                            remaining=max(0, total_list - idx - 1),
-                        )
-
-                    await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.5)
 
                 phase = "wave_summary"
                 if _after_wave_test_hook is not None:
@@ -792,6 +936,9 @@ async def run_user_pipeline(
                         collected_total=ws.collected_total,
                         breakdown=breakdown,
                         next_action=next_action,
+                        consecutive_same_result_sets=consecutive_same_no_action,
+                        consecutive_no_actionable_waves=consecutive_same_no_action,
+                        fingerprint_size=len(fp),
                     )
 
                 log.info(
@@ -800,6 +947,9 @@ async def run_user_pipeline(
                     wave=wave,
                     next_action=next_action,
                 )
+
+                last_fp = fp
+                prev_wave_terminal_idle = terminal_only_wave
 
                 if cancel or stopped:
                     break
@@ -823,10 +973,11 @@ async def run_user_pipeline(
                     chat_id,
                     daily_limit,
                     cancel_event,
-                    poll_sec,
+                    next_poll_sleep,
                     reason=poll_reason,
                     next_wave_number=next_wave_num,
                 )
+                last_poll_sleep_used = next_poll_sleep
                 if cancelled:
                     break
                 continue

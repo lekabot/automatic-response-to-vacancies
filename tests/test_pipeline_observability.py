@@ -25,7 +25,13 @@ async def sqlite_db(tmp_path):
     db._session_factory = None  # type: ignore[attr-defined]
 
 
-def _cfg(monkeypatch, *, search_poll_interval_seconds: int = 0, daily_limit: int = 50) -> None:
+def _cfg(
+    monkeypatch,
+    *,
+    search_poll_interval_seconds: float = 0,
+    daily_limit: int = 50,
+    same_result_backoff_enabled: bool = True,
+) -> None:
     cfg = SimpleNamespace()
     cfg.hh = SimpleNamespace(
         user_agent="UA",
@@ -45,6 +51,8 @@ def _cfg(monkeypatch, *, search_poll_interval_seconds: int = 0, daily_limit: int
             apply_per_attempt_timeout_seconds=10.0,
             repeat_interval_minutes=60,
             search_poll_interval_seconds=search_poll_interval_seconds,
+            search_poll_interval_max_seconds=300.0,
+            same_result_backoff_enabled=same_result_backoff_enabled,
         ),
     )
     cfg.storage = SimpleNamespace(retention_days=30)
@@ -182,7 +190,11 @@ async def test_poll_sleep_short_not_hourly_interval(sqlite_db, monkeypatch) -> N
             return []
 
     monkeypatch.setattr("src.pipeline.HHClient", MockHH)
-    _cfg(monkeypatch, search_poll_interval_seconds=2)
+    _cfg(
+        monkeypatch,
+        search_poll_interval_seconds=2,
+        same_result_backoff_enabled=False,
+    )
 
     ev = asyncio.Event()
 

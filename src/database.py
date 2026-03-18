@@ -5,7 +5,7 @@ import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Literal
 
 import structlog
 from sqlalchemy import delete as sa_delete
@@ -210,6 +210,61 @@ async def try_claim_vacancy_for_processing(
             current_status=VacancyStatus.IN_PROGRESS,
             next_retry_at=None,
         )
+
+
+ClaimPeek = Literal["terminal", "backoff", "in_progress", "claimable"]
+
+
+async def batch_peek_claim_paths(
+    chat_id: int,
+    vacancy_ids: list[str],
+    *,
+    retention_days: int,
+    lease_minutes: int,
+) -> dict[str, tuple[ClaimPeek, str | None]]:
+    """
+    Read-only: (путь_клейма, статус в БД для terminal иначе None).
+    terminal — только SKIP_TERMINAL; иначе волну нельзя short-circuit по этому id.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days)
+    lease_td = timedelta(minutes=lease_minutes)
+    if not vacancy_ids:
+        return {}
+    async with get_session() as session:
+        res = await session.execute(
+            select(VacancySeen).where(
+                VacancySeen.chat_id == chat_id,
+                VacancySeen.vacancy_id.in_(vacancy_ids),
+            )
+        )
+        by_id = {row.vacancy_id: row for row in res.scalars().all()}
+    out: dict[str, tuple[ClaimPeek, str | None]] = {}
+    for vid in vacancy_ids:
+        row = by_id.get(vid)
+        if row is not None:
+            seen = _aware(row.seen_at) or now
+            if seen < cutoff:
+                row = None
+        if row is None:
+            out[vid] = ("claimable", None)
+            continue
+        st = row.status
+        if st in _TERMINAL_SKIP:
+            out[vid] = ("terminal", st.value)
+            continue
+        if st == VacancyStatus.IN_PROGRESS:
+            started = _aware(row.processing_started_at)
+            if started is not None and (now - started) < lease_td:
+                out[vid] = ("in_progress", None)
+                continue
+        if st in (VacancyStatus.APPLY_TIMEOUT, VacancyStatus.APPLY_TEMP_ERROR):
+            nr = _aware(row.next_retry_at)
+            if nr is not None and nr > now:
+                out[vid] = ("backoff", None)
+                continue
+        out[vid] = ("claimable", None)
+    return out
 
 
 async def persist_terminal_vacancy(

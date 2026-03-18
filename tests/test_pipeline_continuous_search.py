@@ -45,6 +45,8 @@ def _cfg(monkeypatch, *, daily_limit: int = 5, poll_sec: float = 0.02) -> None:
             apply_per_attempt_timeout_seconds=10.0,
             repeat_interval_minutes=60,
             search_poll_interval_seconds=poll_sec,
+            search_poll_interval_max_seconds=300.0,
+            same_result_backoff_enabled=False,
         ),
     )
     cfg.storage = SimpleNamespace(retention_days=30)
