@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
 
@@ -105,6 +106,14 @@ class ClaimReason:
     SKIP_IN_PROGRESS = "skip_in_progress"
 
 
+@dataclass(slots=True)
+class ClaimDecision:
+    reason: str
+    attempt_count: int
+    current_status: VacancyStatus | None = None
+    next_retry_at: datetime | None = None
+
+
 async def try_claim_vacancy_for_processing(
     *,
     chat_id: int,
@@ -115,7 +124,7 @@ async def try_claim_vacancy_for_processing(
     salary_text: str | None,
     retention_days: int,
     lease_minutes: int,
-) -> tuple[str, int]:
+) -> ClaimDecision:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=retention_days)
     lease = timedelta(minutes=lease_minutes)
@@ -133,17 +142,33 @@ async def try_claim_vacancy_for_processing(
         if row is not None:
             st = row.status
             if st in _TERMINAL_SKIP:
-                return (ClaimReason.SKIP_TERMINAL, row.attempt_count)
+                return ClaimDecision(
+                    reason=ClaimReason.SKIP_TERMINAL,
+                    attempt_count=row.attempt_count,
+                    current_status=st,
+                    next_retry_at=_aware(row.next_retry_at),
+                )
 
             if st == VacancyStatus.IN_PROGRESS:
                 started = _aware(row.processing_started_at)
                 if started is not None and (now - started) < lease:
-                    return (ClaimReason.SKIP_IN_PROGRESS, row.attempt_count)
+                    claim_after = started + lease
+                    return ClaimDecision(
+                        reason=ClaimReason.SKIP_IN_PROGRESS,
+                        attempt_count=row.attempt_count,
+                        current_status=VacancyStatus.IN_PROGRESS,
+                        next_retry_at=claim_after,
+                    )
 
             if st in (VacancyStatus.APPLY_TIMEOUT, VacancyStatus.APPLY_TEMP_ERROR):
                 nr = _aware(row.next_retry_at)
                 if nr is not None and nr > now:
-                    return (ClaimReason.SKIP_BACKOFF, row.attempt_count)
+                    return ClaimDecision(
+                        reason=ClaimReason.SKIP_BACKOFF,
+                        attempt_count=row.attempt_count,
+                        current_status=st,
+                        next_retry_at=nr,
+                    )
 
             ac = row.attempt_count + 1
             row.status = VacancyStatus.IN_PROGRESS
@@ -157,7 +182,12 @@ async def try_claim_vacancy_for_processing(
             row.url = url
             row.salary_text = salary_text
             row.seen_at = now
-            return (ClaimReason.CLAIMED, ac)
+            return ClaimDecision(
+                reason=ClaimReason.CLAIMED,
+                attempt_count=ac,
+                current_status=VacancyStatus.IN_PROGRESS,
+                next_retry_at=None,
+            )
 
         session.add(
             VacancySeen(
@@ -174,7 +204,12 @@ async def try_claim_vacancy_for_processing(
                 seen_at=now,
             )
         )
-        return (ClaimReason.CLAIMED, 1)
+        return ClaimDecision(
+            reason=ClaimReason.CLAIMED,
+            attempt_count=1,
+            current_status=VacancyStatus.IN_PROGRESS,
+            next_retry_at=None,
+        )
 
 
 async def persist_terminal_vacancy(

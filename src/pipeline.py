@@ -351,7 +351,7 @@ async def run_user_pipeline(
                     await asyncio.sleep(0.5)
                     continue
 
-                reason, attempt_count = await db.try_claim_vacancy_for_processing(
+                claim = await db.try_claim_vacancy_for_processing(
                     chat_id=chat_id,
                     vacancy_id=vacancy.id,
                     title=vacancy.name,
@@ -361,19 +361,37 @@ async def run_user_pipeline(
                     retention_days=retention,
                     lease_minutes=lease_min,
                 )
+                attempt_count = claim.attempt_count
+                _nr = (
+                    claim.next_retry_at.isoformat()
+                    if claim.next_retry_at is not None
+                    else None
+                )
+                _st = claim.current_status.value if claim.current_status is not None else None
 
-                if reason == ClaimReason.SKIP_TERMINAL:
+                if claim.reason == ClaimReason.SKIP_TERMINAL:
+                    log.info(
+                        "pipeline.vacancy.skipped_terminal",
+                        chat_id=chat_id,
+                        vacancy_id=vacancy.id,
+                        title=vacancy.name,
+                        attempt_count=attempt_count,
+                        current_status=_st,
+                        next_retry_at=_nr,
+                    )
                     processed += 1
                     await asyncio.sleep(0.5)
                     continue
 
-                if reason == ClaimReason.SKIP_BACKOFF:
+                if claim.reason == ClaimReason.SKIP_BACKOFF:
                     log.info(
                         "pipeline.vacancy.skipped_due_to_backoff",
+                        chat_id=chat_id,
                         vacancy_id=vacancy.id,
                         title=vacancy.name,
-                        chat_id=chat_id,
                         attempt_count=attempt_count,
+                        current_status=_st,
+                        next_retry_at=_nr,
                     )
                     processed += 1
                     if processed % heartbeat_n == 0:
@@ -387,11 +405,29 @@ async def run_user_pipeline(
                     await asyncio.sleep(0.5)
                     continue
 
-                if reason == ClaimReason.SKIP_IN_PROGRESS:
+                if claim.reason == ClaimReason.SKIP_IN_PROGRESS:
+                    log.info(
+                        "pipeline.vacancy.skipped_in_progress",
+                        chat_id=chat_id,
+                        vacancy_id=vacancy.id,
+                        title=vacancy.name,
+                        attempt_count=attempt_count,
+                        current_status=_st,
+                        next_retry_at=_nr,
+                    )
                     processed += 1
                     await asyncio.sleep(0.5)
                     continue
 
+                log.info(
+                    "pipeline.vacancy.claimed",
+                    chat_id=chat_id,
+                    vacancy_id=vacancy.id,
+                    title=vacancy.name,
+                    attempt_count=attempt_count,
+                    current_status=_st,
+                    next_retry_at=_nr,
+                )
                 log.info(
                     "pipeline.vacancy.start",
                     vacancy_id=vacancy.id,

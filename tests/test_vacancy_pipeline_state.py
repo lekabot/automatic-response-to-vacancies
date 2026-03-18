@@ -59,7 +59,7 @@ def _mock_pipeline_config(monkeypatch, *, daily_limit: int = 500) -> None:
 
 @pytest.mark.asyncio
 async def test_claim_new_vacancy(sqlite_db) -> None:
-    r, ac = await db.try_claim_vacancy_for_processing(
+    d = await db.try_claim_vacancy_for_processing(
         chat_id=C1,
         vacancy_id="v1",
         title="T",
@@ -69,8 +69,10 @@ async def test_claim_new_vacancy(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    assert r == ClaimReason.CLAIMED
-    assert ac == 1
+    assert d.reason == ClaimReason.CLAIMED
+    assert d.attempt_count == 1
+    assert d.current_status == VacancyStatus.IN_PROGRESS
+    assert d.next_retry_at is None
 
 
 @pytest.mark.asyncio
@@ -85,7 +87,7 @@ async def test_two_users_same_vacancy_id_independent(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    r2, ac2 = await db.try_claim_vacancy_for_processing(
+    d2 = await db.try_claim_vacancy_for_processing(
         chat_id=C2,
         vacancy_id="same",
         title="B",
@@ -95,8 +97,8 @@ async def test_two_users_same_vacancy_id_independent(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    assert r2 == ClaimReason.CLAIMED
-    assert ac2 == 1
+    assert d2.reason == ClaimReason.CLAIMED
+    assert d2.attempt_count == 1
     async with db.get_session() as session:
         r1 = await session.get(VacancySeen, _pk(C1, "same"))
         r2b = await session.get(VacancySeen, _pk(C2, "same"))
@@ -116,7 +118,7 @@ async def test_claim_applied_terminal_skip(sqlite_db) -> None:
         salary_text=None,
         status=VacancyStatus.APPLIED,
     )
-    r, _ = await db.try_claim_vacancy_for_processing(
+    d = await db.try_claim_vacancy_for_processing(
         chat_id=C1,
         vacancy_id="v1",
         title="T",
@@ -126,7 +128,8 @@ async def test_claim_applied_terminal_skip(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    assert r == ClaimReason.SKIP_TERMINAL
+    assert d.reason == ClaimReason.SKIP_TERMINAL
+    assert d.current_status == VacancyStatus.APPLIED
 
 
 @pytest.mark.asyncio
@@ -145,7 +148,7 @@ async def test_claim_backoff_active(sqlite_db) -> None:
                 next_retry_at=future,
             )
         )
-    r, _ = await db.try_claim_vacancy_for_processing(
+    d = await db.try_claim_vacancy_for_processing(
         chat_id=C1,
         vacancy_id="v1",
         title="T",
@@ -155,7 +158,42 @@ async def test_claim_backoff_active(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    assert r == ClaimReason.SKIP_BACKOFF
+    assert d.reason == ClaimReason.SKIP_BACKOFF
+    assert d.current_status == VacancyStatus.APPLY_TIMEOUT
+    assert d.next_retry_at is not None
+    assert d.next_retry_at == future
+
+
+@pytest.mark.asyncio
+async def test_claim_in_progress_within_lease_skip(sqlite_db) -> None:
+    started = datetime.now(timezone.utc) - timedelta(minutes=2)
+    async with db.get_session() as session:
+        session.add(
+            VacancySeen(
+                chat_id=C1,
+                vacancy_id="vip",
+                title="T",
+                employer="E",
+                url="u",
+                status=VacancyStatus.IN_PROGRESS,
+                attempt_count=1,
+                processing_started_at=started,
+            )
+        )
+    d = await db.try_claim_vacancy_for_processing(
+        chat_id=C1,
+        vacancy_id="vip",
+        title="T",
+        employer="E",
+        url="u",
+        salary_text=None,
+        retention_days=30,
+        lease_minutes=10,
+    )
+    assert d.reason == ClaimReason.SKIP_IN_PROGRESS
+    assert d.current_status == VacancyStatus.IN_PROGRESS
+    assert d.next_retry_at is not None
+    assert d.next_retry_at == started.replace(tzinfo=timezone.utc) + timedelta(minutes=10)
 
 
 @pytest.mark.asyncio
@@ -174,7 +212,7 @@ async def test_claim_stale_in_progress_reclaimed(sqlite_db) -> None:
                 processing_started_at=old,
             )
         )
-    r, ac = await db.try_claim_vacancy_for_processing(
+    d = await db.try_claim_vacancy_for_processing(
         chat_id=C1,
         vacancy_id="v1",
         title="T",
@@ -184,8 +222,8 @@ async def test_claim_stale_in_progress_reclaimed(sqlite_db) -> None:
         retention_days=30,
         lease_minutes=10,
     )
-    assert r == ClaimReason.CLAIMED
-    assert ac == 2
+    assert d.reason == ClaimReason.CLAIMED
+    assert d.attempt_count == 2
 
 
 @pytest.mark.asyncio
