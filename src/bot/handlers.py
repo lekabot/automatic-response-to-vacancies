@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -31,7 +32,7 @@ from telegram.ext import (
     filters,
 )
 from src import database as db
-from src.bot.formatters import format_final_summary, format_hourly_summary
+from src.bot.formatters import format_final_summary
 from src.bot.keyboards import (
     back_keyboard,
     main_menu_keyboard,
@@ -626,6 +627,8 @@ async def _start_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.callback_query.answer("⚠️ Поиск уже запущен!", show_alert=True)
         return SEARCHING
 
+    await db.start_search_session(chat_id, datetime.now(timezone.utc))
+
     cancel_event = asyncio.Event()
     context.user_data["cancel_event"] = cancel_event
 
@@ -673,109 +676,92 @@ async def _search_task(
 ) -> None:
     from src.pipeline import run_user_pipeline
 
-    config = get_config()
-    repeat_minutes = config.hh.search.repeat_interval_minutes
-    cycle = 0
-    last_stopped_by_limit = False
     aborted_session_invalid = False
+    last_stopped_by_limit = False
 
-    while not cancel_event.is_set():
-        cycle += 1
-        settings = await db.get_user_settings(chat_id)
-        if not settings or not settings.is_complete():
-            log.warning("search_task.incomplete_settings_abort", chat_id=chat_id)
-            break
+    settings = await db.get_user_settings(chat_id)
+    if not settings or not settings.is_complete():
+        log.warning("search_task.incomplete_settings_abort", chat_id=chat_id)
+        await db.clear_search_session(
+            chat_id, log_event="search_session.cleared_on_task_finish"
+        )
+        return
 
-        daily_limit = config.hh.search.daily_apply_limit
+    daily_limit = get_config().hh.search.daily_apply_limit
+    result: dict = dict(_DEFAULT_RUN)
+    try:
+        result = await run_user_pipeline(
+            chat_id=chat_id,
+            hh_email=settings.hh_email,
+            hh_password=settings.hh_password,
+            hhtoken=settings.hhtoken,
+            resume_id=settings.resume_id or "",
+            keywords=settings.keywords,
+            cover_letter=settings.cover_letter or "",
+            cancel_event=cancel_event,
+            bot=bot,
+        )
+    except asyncio.CancelledError:
+        log.info("search_task.pipeline_wait_cancelled", chat_id=chat_id)
+        raise
+    except Exception as exc:
+        log.exception("search_task.error", chat_id=chat_id, error=str(exc))
+        result = dict(_DEFAULT_RUN)
+    finally:
+        await db.clear_search_session(
+            chat_id, log_event="search_session.cleared_on_task_finish"
+        )
+
+    if result.get("session_invalid"):
+        log.error("search_task.session_invalid_stop", chat_id=chat_id)
         try:
-            result = await run_user_pipeline(
-                chat_id=chat_id,
-                hh_email=settings.hh_email,
-                hh_password=settings.hh_password,
-                hhtoken=settings.hhtoken,
-                resume_id=settings.resume_id or "",
-                keywords=settings.keywords,
-                cover_letter=settings.cover_letter or "",
-                cancel_event=cancel_event,
-            )
-        except asyncio.CancelledError:
-            log.info("search_task.pipeline_wait_cancelled", chat_id=chat_id)
-            raise
-        except Exception as exc:
-            log.exception("search_task.error", chat_id=chat_id, error=str(exc))
-            result = dict(_DEFAULT_RUN)
-
-        if result.get("session_invalid"):
-            log.error("search_task.session_invalid_stop", chat_id=chat_id)
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        "⚠️ <b>Сессия hh.ru недействительна.</b>\n\n"
-                        "Откройте настройки в меню и войдите снова."
-                    ),
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception as notify_exc:
-                log.warning(
-                    "search_task.session_invalid_notify_failed",
-                    chat_id=chat_id,
-                    error=str(notify_exc),
-                )
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_msg_id,
-                    text="⚠️ Сессия hh.ru истекла. Обновите вход в настройках.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=back_keyboard(),
-                )
-            except Exception as edit_exc:
-                log.warning(
-                    "search_task.session_invalid_edit_failed",
-                    chat_id=chat_id,
-                    error=str(edit_exc),
-                )
-            aborted_session_invalid = True
-            break
-
-        last_stopped_by_limit = bool(result.get("stopped_by_limit"))
-        if result.get("hh_temp_unavailable"):
-            log.warning(
-                "search_task.cycle_hh_temp_unavailable",
-                chat_id=chat_id,
-                cycle=cycle,
-            )
-
-        if last_stopped_by_limit or cancel_event.is_set():
-            break
-
-        if repeat_minutes > 0:
-            stats = await db.get_today_stats(chat_id)
             await bot.send_message(
                 chat_id=chat_id,
-                text=format_hourly_summary(stats, daily_limit=daily_limit),
+                text=(
+                    "⚠️ <b>Сессия hh.ru недействительна.</b>\n\n"
+                    "Откройте настройки в меню и войдите снова."
+                ),
                 parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
             )
-            log.info("search_task.cycle_done", cycle=cycle, next_in_minutes=repeat_minutes)
-            try:
-                await asyncio.wait_for(cancel_event.wait(), timeout=repeat_minutes * 60)
-                break
-            except asyncio.TimeoutError:
-                config = get_config()
-                repeat_minutes = config.hh.search.repeat_interval_minutes
-        else:
-            break
+        except Exception as notify_exc:
+            log.warning(
+                "search_task.session_invalid_notify_failed",
+                chat_id=chat_id,
+                error=str(notify_exc),
+            )
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text="⚠️ Сессия hh.ru истекла. Обновите вход в настройках.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard(),
+            )
+        except Exception as edit_exc:
+            log.warning(
+                "search_task.session_invalid_edit_failed",
+                chat_id=chat_id,
+                error=str(edit_exc),
+            )
+        aborted_session_invalid = True
+
+    last_stopped_by_limit = bool(result.get("stopped_by_limit"))
+    if result.get("hh_temp_unavailable"):
+        log.warning("search_task.hh_temp_unavailable", chat_id=chat_id)
 
     if cancel_event.is_set() or aborted_session_invalid:
         return
 
     stats = await db.get_today_stats(chat_id)
-    daily_limit = get_config().hh.search.daily_apply_limit
-    text = format_final_summary(
-        stats, daily_limit=daily_limit, stopped_by_limit=last_stopped_by_limit
-    )
+    if last_stopped_by_limit:
+        text = (
+            "🛑 <b>Достигнут дневной лимит откликов.</b>\n\n"
+            "Подробный итог отправлен отдельным сообщением выше."
+        )
+    else:
+        text = format_final_summary(
+            stats, daily_limit=daily_limit, stopped_by_limit=False
+        )
 
     try:
         await bot.edit_message_text(
@@ -810,11 +796,13 @@ async def _send_post_stop_summary(
     bot,
     daily_limit: int,
 ) -> None:
+    forced_cancel = False
     if isinstance(task, asyncio.Task) and not task.done():
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=240.0)
         except asyncio.TimeoutError:
             log.error("handlers.stop_search.forced_cancel_after_wait", chat_id=chat_id)
+            forced_cancel = True
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=20.0)
@@ -839,6 +827,9 @@ async def _send_post_stop_summary(
                 "handlers.stop_search.summary_wait_cancelled",
                 chat_id=chat_id,
             )
+    if forced_cancel:
+        log.info("search_session.cleared_on_forced_cancel", chat_id=chat_id)
+        await db.clear_search_session(chat_id)
     try:
         stats = await db.get_today_stats(chat_id)
         text = format_final_summary(
@@ -884,6 +875,8 @@ async def _background_search_shutdown(chat_id: int, task: asyncio.Task | None) -
                 chat_id=chat_id,
                 error=str(exc),
             )
+        log.info("search_session.cleared_on_forced_cancel", chat_id=chat_id)
+        await db.clear_search_session(chat_id)
     except Exception as exc:
         log.warning(
             "handlers.back_to_menu.bg_unexpected",
@@ -900,6 +893,7 @@ async def stop_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     cancel_event = context.user_data.get("cancel_event")
     if isinstance(cancel_event, asyncio.Event):
         cancel_event.set()
+    await db.clear_search_session(chat_id, log_event="search_session.cleared_on_stop_search")
 
     t = context.user_data.get("search_task")
     config = get_config()
@@ -926,6 +920,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     ce = context.user_data.get("cancel_event")
     if isinstance(ce, asyncio.Event):
         ce.set()
+    await db.clear_search_session(chat_id, log_event="search_session.cleared_on_back_to_menu")
     task = context.user_data.get("search_task")
     asyncio.create_task(
         _background_search_shutdown(

@@ -1,8 +1,5 @@
-"""Перед каждым циклом _search_task подтягивает UserSettings из БД."""
+"""Один вызов run_user_pipeline на сессию поиска."""
 from __future__ import annotations
-
-import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -10,11 +7,12 @@ from src.bot import handlers as h
 
 
 @pytest.mark.asyncio
-async def test_search_task_second_cycle_uses_updated_keywords(monkeypatch) -> None:
-    log_kw: list[list[str]] = []
+async def test_search_task_calls_pipeline_once_with_bot(monkeypatch) -> None:
+    calls: list[int] = []
 
     async def fake_run_user_pipeline(**kwargs):
-        log_kw.append(list(kwargs["keywords"]))
+        calls.append(1)
+        assert kwargs.get("bot") is not None
         return {
             "applied": 0,
             "stopped_by_limit": False,
@@ -24,11 +22,9 @@ async def test_search_task_second_cycle_uses_updated_keywords(monkeypatch) -> No
 
     monkeypatch.setattr("src.pipeline.run_user_pipeline", fake_run_user_pipeline)
 
-    call_n = [0]
-
-    def make_settings(words: list[str]) -> SimpleNamespace:
-        s = SimpleNamespace()
-        s.keywords = words
+    def make_settings():
+        s = type("S", (), {})()
+        s.keywords = ["a"]
         s.hh_email = "u@e.com"
         s.hhtoken = "ht"
         s.resume_id = "res"
@@ -37,15 +33,23 @@ async def test_search_task_second_cycle_uses_updated_keywords(monkeypatch) -> No
         s.is_complete = lambda: True
         return s
 
-    async def fake_get_settings(_cid: int):
-        call_n[0] += 1
-        if call_n[0] == 1:
-            return make_settings(["cycle_a"])
-        return make_settings(["cycle_b"])
+    async def fake_get(_cid: int):
+        return make_settings()
 
-    monkeypatch.setattr(h.db, "get_user_settings", fake_get_settings)
+    monkeypatch.setattr(h.db, "get_user_settings", fake_get)
 
-    async def fake_stats(_cid: int):
+    cfg = type("C", (), {})()
+    cfg.hh = type("H", (), {})()
+    cfg.hh.search = type("S", (), {})()
+    cfg.hh.search.daily_apply_limit = 100
+    monkeypatch.setattr(h, "get_config", lambda: cfg)
+
+    async def noop_clear(_cid: int, log_event: str | None = None) -> bool:
+        return False
+
+    monkeypatch.setattr(h.db, "clear_search_session", noop_clear)
+
+    async def fake_stats(_cid: int) -> dict:
         return {
             "applied": 0,
             "failed": 0,
@@ -59,15 +63,6 @@ async def test_search_task_second_cycle_uses_updated_keywords(monkeypatch) -> No
 
     monkeypatch.setattr(h.db, "get_today_stats", fake_stats)
 
-    cfg = SimpleNamespace()
-    cfg.hh = SimpleNamespace(
-        search=SimpleNamespace(
-            repeat_interval_minutes=1.0 / 60.0,
-            daily_apply_limit=100,
-        )
-    )
-    monkeypatch.setattr(h, "get_config", lambda: cfg)
-
     class BotStub:
         async def send_message(self, *_a, **_k) -> None:
             return None
@@ -75,19 +70,12 @@ async def test_search_task_second_cycle_uses_updated_keywords(monkeypatch) -> No
         async def edit_message_text(self, *_a, **_k) -> None:
             return None
 
-    ev = asyncio.Event()
+    import asyncio
 
-    async def stop_soon() -> None:
-        await asyncio.sleep(2.4)
-        ev.set()
-
-    asyncio.create_task(stop_soon())
     await h._search_task(
         chat_id=4242,
         bot=BotStub(),
-        cancel_event=ev,
+        cancel_event=asyncio.Event(),
         status_msg_id=1,
     )
-    assert len(log_kw) >= 2
-    assert log_kw[0] == ["cycle_a"]
-    assert log_kw[1] == ["cycle_b"]
+    assert len(calls) == 1

@@ -78,6 +78,10 @@ class UserSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    search_session_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_hourly_report_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def keywords(self) -> list[str]:

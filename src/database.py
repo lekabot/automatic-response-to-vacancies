@@ -368,6 +368,201 @@ async def reset_applied_vacancies(chat_id: int) -> int:
         return result.rowcount  # type: ignore[union-attr]
 
 
+async def start_search_session(chat_id: int, started_at: datetime) -> None:
+    now = datetime.now(timezone.utc)
+    at = _aware(started_at) or now
+    async with get_session() as session:
+        row = await session.get(UserSettings, chat_id)
+        if row is None:
+            row = UserSettings(chat_id=chat_id)
+            session.add(row)
+        row.search_session_started_at = at
+        row.last_hourly_report_slot = None
+        row.updated_at = now
+
+
+async def clear_search_session(chat_id: int, *, log_event: str | None = None) -> bool:
+    """
+    Сбрасывает search session. Идемпотентно.
+    Возвращает True, если до вызова была активная сессия (и сброс выполнен).
+    """
+    now = datetime.now(timezone.utc)
+    had_active = False
+    async with get_session() as session:
+        row = await session.get(UserSettings, chat_id)
+        if row is None:
+            return False
+        if row.search_session_started_at is not None or row.last_hourly_report_slot is not None:
+            had_active = True
+        if not had_active:
+            return False
+        row.search_session_started_at = None
+        row.last_hourly_report_slot = None
+        row.updated_at = now
+    if log_event:
+        log.info(log_event, chat_id=chat_id)
+    return True
+
+
+async def try_claim_current_hourly_report_slot(
+    chat_id: int, now: datetime
+) -> tuple[int | None, int]:
+    """
+    Занимает только актуальный слот current_slot = floor((now-start)/1h), без догона 1..N-1.
+    Возвращает (claimed_slot, previous_last) — previous_last для отката (0 если было None).
+    """
+    now = _aware(now) or datetime.now(timezone.utc)
+    async with get_session() as session:
+        row = await session.get(UserSettings, chat_id)
+        if row is None or row.search_session_started_at is None:
+            return None, 0
+        start = _aware(row.search_session_started_at)
+        if start is None:
+            return None, 0
+        elapsed_sec = (now - start).total_seconds()
+        current_slot = int(elapsed_sec // 3600)
+        if current_slot < 1:
+            return None, 0
+        last = row.last_hourly_report_slot or 0
+        if current_slot <= last:
+            return None, last
+        if current_slot > last + 1:
+            log.info(
+                "hourly_report.skipped_stale_slots",
+                chat_id=chat_id,
+                previous_last=last,
+                current_slot=current_slot,
+                skipped_from=last + 1,
+                skipped_to=current_slot - 1,
+            )
+        previous_last = last
+        row.last_hourly_report_slot = current_slot
+        row.updated_at = now
+        log.info(
+            "hourly_report.claimed_current_slot",
+            chat_id=chat_id,
+            slot=current_slot,
+            previous_last=previous_last,
+        )
+        return current_slot, previous_last
+
+
+async def revert_hourly_report_to_previous_last(chat_id: int, previous_last: int) -> None:
+    """После неудачной отправки: вернуть last_hourly_report_slot к previous_last (0 → None)."""
+    async with get_session() as session:
+        row = await session.get(UserSettings, chat_id)
+        if row is None:
+            return
+        row.last_hourly_report_slot = None if previous_last < 1 else previous_last
+        row.updated_at = datetime.now(timezone.utc)
+
+
+async def get_session_window_stats(chat_id: int) -> dict[str, Any] | None:
+    """Статистика только с момента search_session_started_at."""
+    async with get_session() as session:
+        us = await session.get(UserSettings, chat_id)
+        if us is None or us.search_session_started_at is None:
+            return None
+        start = _aware(us.search_session_started_at)
+        if start is None:
+            return None
+
+        agg = await session.execute(
+            select(VacancySeen.status, func.count())
+            .where(
+                VacancySeen.chat_id == chat_id,
+                VacancySeen.seen_at >= start,
+            )
+            .group_by(VacancySeen.status)
+        )
+        failed_rows = await session.execute(
+            select(
+                VacancySeen.title,
+                VacancySeen.employer,
+                VacancySeen.url,
+                VacancySeen.salary_text,
+            ).where(
+                VacancySeen.chat_id == chat_id,
+                VacancySeen.seen_at >= start,
+                VacancySeen.status == VacancyStatus.APPLY_PERM_ERROR,
+            )
+        )
+
+    counts: dict[str, int] = {s.value: 0 for s in VacancyStatus}
+    for status, cnt in agg.all():
+        counts[status.value] = int(cnt)
+
+    failed_vacancies: list[dict[str, Any]] = [
+        {
+            "title": t,
+            "employer": e,
+            "url": u,
+            "salary_text": sal or "з/п не указана",
+        }
+        for t, e, u, sal in failed_rows.all()
+    ]
+
+    applied = counts.get(VacancyStatus.APPLIED.value, 0)
+    failed = counts.get(VacancyStatus.APPLY_PERM_ERROR.value, 0)
+    retry_later = (
+        counts.get(VacancyStatus.APPLY_TIMEOUT.value, 0)
+        + counts.get(VacancyStatus.APPLY_TEMP_ERROR.value, 0)
+    )
+
+    return {
+        "applied": applied,
+        "failed": failed,
+        "retry_later": retry_later,
+        "skipped": counts.get(VacancyStatus.SKIPPED.value, 0),
+        "requires_test": counts.get(VacancyStatus.REQUIRES_TEST.value, 0),
+        "already_applied": counts.get(VacancyStatus.ALREADY_APPLIED.value, 0),
+        "failed_vacancies": failed_vacancies,
+        "counts": counts,
+    }
+
+
+async def get_session_test_vacancies(
+    chat_id: int, *, limit: int = 20
+) -> tuple[list[dict[str, Any]], int]:
+    """REQUIRES_TEST в окне текущей search session; (страница, всего)."""
+    async with get_session() as session:
+        us = await session.get(UserSettings, chat_id)
+        if us is None or us.search_session_started_at is None:
+            return [], 0
+        start = _aware(us.search_session_started_at)
+        if start is None:
+            return [], 0
+
+        total = await session.scalar(
+            select(func.count())
+            .select_from(VacancySeen)
+            .where(
+                VacancySeen.chat_id == chat_id,
+                VacancySeen.seen_at >= start,
+                VacancySeen.status == VacancyStatus.REQUIRES_TEST,
+            )
+        )
+        n = int(total or 0)
+        if n == 0:
+            return [], 0
+
+        rows = await session.execute(
+            select(VacancySeen.title, VacancySeen.employer, VacancySeen.url)
+            .where(
+                VacancySeen.chat_id == chat_id,
+                VacancySeen.seen_at >= start,
+                VacancySeen.status == VacancyStatus.REQUIRES_TEST,
+            )
+            .order_by(VacancySeen.seen_at.desc())
+            .limit(limit)
+        )
+        out = [
+            {"title": t, "employer": e, "url": u or ""}
+            for t, e, u in rows.all()
+        ]
+        return out, n
+
+
 async def get_user_settings(chat_id: int) -> UserSettings | None:
     async with get_session() as session:
         return await session.get(UserSettings, chat_id)

@@ -1,7 +1,11 @@
 """Тесты форматирования сообщений."""
 from __future__ import annotations
 
-from src.bot.formatters import format_final_summary, format_hourly_summary
+from src.bot.formatters import (
+    format_final_summary,
+    format_hourly_summary,
+    format_session_progress_report,
+)
 
 
 def _stats(applied=0, failed=0, skipped=0, requires_test=0, vacancies=None):
@@ -68,3 +72,27 @@ class TestFormatFinalSummary:
         text = format_final_summary(_stats(failed=1, vacancies=vacancies), daily_limit=200, stopped_by_limit=False)
         assert "<b>Bad</b>" not in text
         assert "&lt;b&gt;" in text
+
+
+def test_session_report_includes_test_vacancy_urls() -> None:
+    stats = {
+        "applied": 1,
+        "failed": 0,
+        "retry_later": 0,
+        "skipped": 0,
+        "requires_test": 2,
+        "already_applied": 0,
+        "failed_vacancies": [],
+        "counts": {},
+    }
+    tests = [
+        {"title": "QA with test", "employer": "Co", "url": "https://hh.ru/v/99"},
+        {"title": "No URL job", "employer": "X", "url": ""},
+    ]
+    text = format_session_progress_report(
+        stats, tests, test_vacancies_total=5, daily_limit=200, is_final=False
+    )
+    assert "Vacancies with test tasks" in text
+    assert "https://hh.ru/v/99" in text
+    assert "URL unavailable" in text
+    assert "and 3 more" in text or "3 more" in text
