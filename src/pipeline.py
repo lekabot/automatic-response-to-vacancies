@@ -213,7 +213,7 @@ async def _poll_sleep_before_next_wave(
     log.info(
         "pipeline.poll_sleep",
         chat_id=chat_id,
-        sleep_seconds=round(sleep_seconds, 1),
+        sleep_seconds=round(sleep_seconds, 2),
         reason=reason,
         next_wave_number=next_wave_number,
     )

@@ -243,6 +243,9 @@ async def test_hourly_report_once_while_polling_many_cycles(sqlite_db, monkeypat
     _cfg(monkeypatch, daily_limit=50, poll_sec=0.04)
 
     class MockHH:
+        def __init__(self, *_, **__) -> None:
+            pass
+
         async def __aenter__(self):
             return self
 
