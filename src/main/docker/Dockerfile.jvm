@@ -1,0 +1,65 @@
+###############################################################################
+# Dockerfile.jvm — Production JVM image (PRIMARY delivery mode)
+#
+# Преимущества JVM-образа перед native:
+# - Быстрая сборка (< 5 мин vs 20+ мин для native)
+# - Полная поддержка рефлексии (jsoup, OkHttp, Jackson без конфигурации)
+# - Хорошо известная модель устранения неполадок (heap dumps, flight recorder)
+# - JVM JIT прогревается и может превысить native по throughput в долгосрочной перспективе
+# - Меньший риск incompatibility при обновлении зависимостей
+#
+# Когда предпочтительнее native image:
+# - Экстремально ограниченная RAM (< 100MB)
+# - Startup < 100ms является жёстким требованием
+# - Инфраструктура Serverless/Lambda
+###############################################################################
+
+# ─── Stage 1: Build ──────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk-alpine AS builder
+
+WORKDIR /build
+
+# Кэширование зависимостей Gradle
+COPY gradle/ gradle/
+COPY gradlew settings.gradle.kts gradle.properties build.gradle.kts ./
+
+RUN ./gradlew dependencies --no-daemon --quiet 2>/dev/null || true
+
+COPY src/ src/
+
+RUN ./gradlew quarkusBuild -Dquarkus.package.type=fast-jar \
+    --no-daemon --no-build-cache \
+    -x test -x integrationTest -x contractTest
+
+# ─── Stage 2: Runtime ────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jre-alpine AS runtime
+
+LABEL org.opencontainers.image.title="HH Vacancy Assistant" \
+      org.opencontainers.image.description="Telegram bot: HH.ru vacancy search & auto-apply (JVM)" \
+      org.opencontainers.image.vendor="hh-vacancy-assistant" \
+      org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+# Непривилегированный пользователь
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+# Quarkus fast-jar layout
+COPY --from=builder --chown=appuser:appgroup \
+    /build/build/quarkus-app/ ./
+
+# Переменные окружения
+ENV JAVA_OPTS_APPEND="-Dquarkus.http.host=0.0.0.0 \
+    -XX:+UseZGC \
+    -XX:MaxRAMPercentage=75.0 \
+    -XX:+TieredCompilation \
+    --enable-preview"
+ENV QUARKUS_PROFILE=prod
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD wget --quiet --spider http://localhost:8080/health/live || exit 1
+
+ENTRYPOINT ["sh", "-c", "exec java ${JAVA_OPTS_APPEND} -jar /app/quarkus-run.jar"]

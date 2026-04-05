@@ -1,0 +1,48 @@
+###############################################################################
+# Dockerfile.native — Optional GraalVM native image
+#
+# Используйте только если:
+# - RAM < 100MB является жёстким ограничением
+# - Startup time критичен (например, Kubernetes pod autoscaling)
+# - Вы готовы к более длинному CI (~20-25 мин на сборку)
+#
+# Tradeoffs:
+# - Нет JIT: predictable latency, но ниже peak throughput
+# - Ограниченная рефлексия: требует reflect-config.json для jsoup/OkHttp
+# - Сложнее отлаживать в production
+# - Сборка занимает значительно дольше
+###############################################################################
+
+# ─── Stage 1: Native build ────────────────────────────────────────────────────
+FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25 AS native-builder
+
+WORKDIR /build
+
+COPY gradle/ gradle/
+COPY gradlew settings.gradle.kts gradle.properties build.gradle.kts ./
+COPY src/ src/
+
+RUN ./gradlew build -Dquarkus.package.type=native \
+    -Dquarkus.native.container-build=false \
+    --no-daemon \
+    -x test -x integrationTest -x contractTest
+
+# ─── Stage 2: Minimal native runtime ──────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/ubi-micro:latest AS runtime
+
+LABEL org.opencontainers.image.title="HH Vacancy Assistant" \
+      org.opencontainers.image.description="Telegram bot: HH.ru vacancy search & auto-apply (Native)" \
+      org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+COPY --from=native-builder /build/build/*-runner ./application
+
+RUN chmod +x ./application
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget --quiet --spider http://localhost:8080/health/live || exit 1
+
+ENTRYPOINT ["./application", "-Dquarkus.http.host=0.0.0.0"]
