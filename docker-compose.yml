@@ -1,37 +1,64 @@
 services:
-  hh-assistant:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: hh-assistant
+  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: hh-postgres
     restart: unless-stopped
-
-    env_file:
-      - .env
-
     environment:
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
+      POSTGRES_DB: hhassistant
+      POSTGRES_USER: ${DB_USER:-hhassistant}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
     volumes:
-      # Именованный том — данные сохраняются между деплоями независимо от workspace
-      - hh_data:/data
-      # config.yaml берётся из репо, монтируется read-only
-      - ./config.yaml:/app/config.yaml:ro
-
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hhassistant} -d hhassistant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
+  # ─── HH Vacancy Assistant (JVM) ──────────────────────────────────────────────
+  hh-assistant:
+    build:
+      context: .
+      dockerfile: src/main/docker/Dockerfile.jvm
+      target: runtime
+    image: hh-vacancy-assistant:${IMAGE_TAG:-latest}
+    container_name: hh-assistant
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hhassistant
+      DB_USER: ${DB_USER:-hhassistant}
+      DB_PASSWORD: ${DB_PASSWORD}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      QUARKUS_PROFILE: prod
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost:8080/health/live || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
 volumes:
-  hh_data:
-    name: hh_data
+  postgres_data:
+    name: hh_postgres_data

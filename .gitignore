@@ -1,31 +1,47 @@
-# Secrets — НИКОГДА не коммить
-.env
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-.pytest_cache/
-.ruff_cache/
-*.egg-info/
-dist/
+# Gradle
+.gradle/
 build/
-.venv/
-venv/
-env/
-
-# Data
-data/*.sqlite
-data/*.sqlite-wal
-data/*.sqlite-shm
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
 
 # IDE
 .idea/
+*.iml
+*.iws
 .vscode/
-*.swp
+*.classpath
+*.project
+.settings/
 
-# Docker
-.docker/
-
-# Logs
+# Java
+*.class
+*.jar
+*.war
+*.ear
 *.log
+
+# Quarkus
+**/target/
+quarkus-app/
+**/quarkus/
+
+# Env / secrets
+.env
+*.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# JaCoCo
+**/jacoco/
+**/jacocoHtml/
+
+# PIT
+**/pit-reports/
+**/pitest/
+
+# Testcontainers
+.testcontainers.properties
