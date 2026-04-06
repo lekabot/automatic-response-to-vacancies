@@ -5,6 +5,7 @@ plugins {
     id("io.quarkus") version "3.8.6"
     jacoco
     id("info.solidsoft.pitest") version "1.15.0"
+    id("nu.studer.jooq") version "9.0"
 }
 
 group = "ru.hhassistant"
@@ -68,6 +69,7 @@ dependencies {
 
     // Core Quarkus
     implementation("io.quarkus:quarkus-arc")
+    implementation("io.quarkus:quarkus-lombok")
     implementation("io.quarkus:quarkus-resteasy-reactive-jackson")
     implementation("io.quarkus:quarkus-smallrye-health")
     implementation("io.quarkus:quarkus-scheduler")
@@ -78,6 +80,9 @@ dependencies {
     implementation("io.quarkus:quarkus-flyway")
     implementation("io.quarkiverse.jooq:quarkus-jooq:2.1.0")
     implementation("org.jooq:jooq:${jooqVersion}")
+
+    // jOOQ code generator classpath (DDLDatabase — генерация без живой БД)
+    jooqGenerator("org.jooq:jooq-meta-extensions:${jooqVersion}")
 
     // Observability
     implementation("io.quarkus:quarkus-micrometer-registry-prometheus")
@@ -219,6 +224,59 @@ configure<PitestPluginExtension> {
             "ru.hhassistant.adapter.*"
         )
     )
+}
+
+// ─── jOOQ code generation ────────────────────────────────────────────────────
+//
+// Генерирует типобезопасные классы таблиц/полей из DDL-миграций (без живой БД).
+// Запуск: ./gradlew generateJooq
+// После генерации используйте классы из пакета ru.hhassistant.infrastructure.db.generated
+// вместо ручного Tables.java.
+
+jooq {
+    version.set(jooqVersion)
+    configurations {
+        create("main") {
+            // false = ручной запуск ./gradlew generateJooq; true = авто перед каждой компиляцией
+            generateSchemaSourceOnCompilation.set(false)
+            jooqConfiguration.apply {
+                logging = org.jooq.meta.jaxb.Logging.WARN
+                generator.apply {
+                    name = "org.jooq.codegen.JavaGenerator"
+                    database.apply {
+                        name = "org.jooq.meta.extensions.ddl.DDLDatabase"
+                        // DDLDatabase работает с PUBLIC-схемой по умолчанию
+                        inputSchema = "PUBLIC"
+                        properties.add(org.jooq.meta.jaxb.Property().apply {
+                            key = "scripts"
+                            value = "src/main/resources/db/migration/V*.sql"
+                        })
+                        properties.add(org.jooq.meta.jaxb.Property().apply {
+                            key = "sort"
+                            value = "flyway"
+                        })
+                        // Нижний регистр: vacancies_seen → VacanciesSeen (CamelCase)
+                        properties.add(org.jooq.meta.jaxb.Property().apply {
+                            key = "defaultNameCase"
+                            value = "lower"
+                        })
+                    }
+                    generate.apply {
+                        isDeprecated   = false
+                        isRecords      = true   // VACANCIES_SEEN → VacanciesSeenRecord
+                        isPojos        = false
+                        isFluentSetters = true
+                        isJavaTimeTypes = true  // java.time.OffsetDateTime вместо Timestamp
+                        isDaos         = false
+                    }
+                    target.apply {
+                        packageName = "ru.hhassistant.infrastructure.db.generated"
+                        directory   = "build/generated-sources/jooq/main"
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─── Docker image tasks ───────────────────────────────────────────────────────

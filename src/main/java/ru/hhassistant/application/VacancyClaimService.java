@@ -3,7 +3,7 @@ package ru.hhassistant.application;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 import ru.hhassistant.domain.model.VacancyCandidate;
 import ru.hhassistant.domain.model.VacancyDecision;
 import ru.hhassistant.domain.model.UserSearchConfig;
@@ -16,9 +16,8 @@ import java.time.Instant;
  * Инкапсулирует взаимодействие с репозиторием и метриками.
  */
 @ApplicationScoped
+@Slf4j
 public class VacancyClaimService {
-
-    private static final Logger log = Logger.getLogger(VacancyClaimService.class);
 
     @Inject VacancyRepository vacancyRepository;
     @Inject MeterRegistry meterRegistry;
@@ -43,22 +42,22 @@ public class VacancyClaimService {
 
         switch (decision) {
             case VacancyDecision.Claimed c ->
-                log.infof("vacancy.claimed chatId=%d vacancyId=%s attempt=%d",
+                log.info("vacancy.claimed chatId={} vacancyId={} attempt={}",
                     config.chatId(), candidate.vacancyId(), c.attemptCount());
             case VacancyDecision.SkipTerminal t -> {
                 meterRegistry.counter("hh.claim.skip_terminal",
                     "status", t.currentStatus().name()).increment();
-                log.debugf("vacancy.skip_terminal chatId=%d vacancyId=%s status=%s",
+                log.debug("vacancy.skip_terminal chatId={} vacancyId={} status={}",
                     config.chatId(), candidate.vacancyId(), t.currentStatus());
             }
             case VacancyDecision.SkipBackoff b -> {
                 meterRegistry.counter("hh.claim.skip_backoff").increment();
-                log.debugf("vacancy.skip_backoff chatId=%d vacancyId=%s nextRetry=%s",
+                log.debug("vacancy.skip_backoff chatId={} vacancyId={} nextRetry={}",
                     config.chatId(), candidate.vacancyId(), b.nextRetryAt());
             }
             case VacancyDecision.SkipInProgress p -> {
                 meterRegistry.counter("hh.claim.skip_in_progress").increment();
-                log.debugf("vacancy.skip_in_progress chatId=%d vacancyId=%s leaseExpires=%s",
+                log.debug("vacancy.skip_in_progress chatId={} vacancyId={} leaseExpires={}",
                     config.chatId(), candidate.vacancyId(), p.leaseExpiresAt());
             }
         }

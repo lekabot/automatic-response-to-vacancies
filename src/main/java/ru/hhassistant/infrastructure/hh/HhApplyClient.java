@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
-import org.jboss.logging.Logger;
 import ru.hhassistant.config.HhConfig;
 
 import java.io.IOException;
@@ -29,9 +29,8 @@ import java.util.regex.Pattern;
  * Retry-политика на уровне вакансии (межцикловый backoff) — в {@link ru.hhassistant.application.VacancyApplyService}.
  */
 @ApplicationScoped
+@Slf4j
 public class HhApplyClient {
-
-    private static final Logger log = Logger.getLogger(HhApplyClient.class);
     static final String APPLY_URL = "https://hh.ru/applicant/vacancy_response/popup";
     static final String WEB_BASE = "https://hh.ru";
     private static final int MAX_INNER_RETRIES = 3;

@@ -7,7 +7,7 @@ import io.quarkus.scheduler.ScheduledExecution;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 import ru.hhassistant.config.HhConfig;
 import ru.hhassistant.domain.model.SearchSession;
 import ru.hhassistant.domain.port.SearchSessionRepository;
@@ -30,9 +30,8 @@ import java.util.concurrent.Semaphore;
  * <p>Telegram не участвует в этом классе.
  */
 @ApplicationScoped
+@Slf4j
 public class SearchSessionScheduler {
-
-    private static final Logger log = Logger.getLogger(SearchSessionScheduler.class);
 
     @Inject SearchSessionService sessionService;
     @Inject SearchSessionRepository sessionRepository;
@@ -53,11 +52,11 @@ public class SearchSessionScheduler {
     @Scheduled(every = "${hh.search.poll-interval-seconds:60}S",
                identity = "hh-polling-cycle")
     void scheduledPoll(ScheduledExecution execution) {
-        log.debugf("scheduler.tick scheduledAt=%s", execution.getScheduledFireTime());
+        log.debug("scheduler.tick scheduledAt={}", execution.getScheduledFireTime());
         List<SearchSession> activeSessions = sessionRepository.findAllActive();
         if (activeSessions.isEmpty()) return;
 
-        log.infof("scheduler.active_sessions count=%d", activeSessions.size());
+        log.info("scheduler.active_sessions count={}", activeSessions.size());
         meterRegistry.gauge("hh.scheduler.active_sessions", activeSessions.size());
 
         for (SearchSession session : activeSessions) {
@@ -73,7 +72,7 @@ public class SearchSessionScheduler {
         long chatId = session.chatId();
         Semaphore sem = perUserLocks.computeIfAbsent(chatId, k -> new Semaphore(1));
         if (!sem.tryAcquire()) {
-            log.debugf("scheduler.skip_concurrent chatId=%d", chatId);
+            log.debug("scheduler.skip_concurrent chatId={}", chatId);
             return;
         }
         try {
@@ -86,7 +85,7 @@ public class SearchSessionScheduler {
                 perUserLocks.remove(chatId);
             }
         } catch (Exception ex) {
-            log.errorf(ex, "scheduler.cycle_crashed chatId=%d", chatId);
+            log.error("scheduler.cycle_crashed chatId={}", chatId, ex);
             meterRegistry.counter("hh.polling_cycle.crashed").increment();
         } finally {
             sem.release();

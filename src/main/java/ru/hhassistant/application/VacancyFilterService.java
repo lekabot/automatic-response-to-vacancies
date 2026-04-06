@@ -3,7 +3,7 @@ package ru.hhassistant.application;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 import ru.hhassistant.domain.model.UserSearchConfig;
 import ru.hhassistant.domain.model.VacancyCandidate;
 
@@ -26,9 +26,8 @@ import java.util.Set;
  * <p>Метрика {@code hh.vacancies.filtered_irrelevant} считает отфильтрованные вакансии.
  */
 @ApplicationScoped
+@Slf4j
 public class VacancyFilterService {
-
-    private static final Logger log = Logger.getLogger(VacancyFilterService.class);
 
     @Inject
     MeterRegistry meterRegistry;
@@ -70,11 +69,11 @@ public class VacancyFilterService {
                 case FilterResult.Irrelevant i -> {
                     meterRegistry.counter("hh.vacancies.filtered_irrelevant",
                         "keyword", keyword).increment();
-                    log.debugf("Filtered irrelevant: vacancyId=%s title=%s missingTokens=%s",
+                    log.debug("Filtered irrelevant: vacancyId={} title={} missingTokens={}",
                         i.vacancy().vacancyId(), i.vacancy().title(), i.missingTokens());
                 }
                 case FilterResult.ExcludedByKeyword e ->
-                    log.debugf("Excluded by keyword '%s': vacancyId=%s",
+                    log.debug("Excluded by keyword '{}': vacancyId={}",
                         e.matchedExclude(), e.vacancy().vacancyId());
                 case FilterResult.HasTest h ->
                     // has_test вакансии попадают в основной цикл для записи REQUIRES_TEST

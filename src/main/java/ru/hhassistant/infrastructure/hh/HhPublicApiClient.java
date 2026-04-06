@@ -4,10 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
 import okhttp3.HttpUrl;
 import okhttp3.Request;
 import okhttp3.Response;
-import org.jboss.logging.Logger;
 import ru.hhassistant.config.HhConfig;
 import ru.hhassistant.domain.model.VacancyCandidate;
 

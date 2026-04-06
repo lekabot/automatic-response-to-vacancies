@@ -2,10 +2,10 @@ package ru.hhassistant.infrastructure.hh;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
-import org.jboss.logging.Logger;
 import ru.hhassistant.config.HhConfig;
 
 import java.io.IOException;

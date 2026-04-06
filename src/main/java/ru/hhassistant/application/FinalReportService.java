@@ -2,7 +2,7 @@ package ru.hhassistant.application;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 import ru.hhassistant.domain.model.ReportSnapshot;
 import ru.hhassistant.domain.model.SearchSession;
 import ru.hhassistant.domain.port.NotificationPort;
@@ -17,9 +17,8 @@ import java.util.List;
  * Отправляет итоговый отчёт при завершении/остановке сессии.
  */
 @ApplicationScoped
+@Slf4j
 public class FinalReportService {
-
-    private static final Logger log = Logger.getLogger(FinalReportService.class);
 
     @Inject VacancyRepository vacancyRepository;
     @Inject SearchSessionRepository sessionRepository;
@@ -32,19 +31,19 @@ public class FinalReportService {
      */
     public void sendFinalAndClearSession(SearchSession session, int dailyLimit) {
         Instant now = clock.instant();
-        log.infof("final_report.sending chatId=%d", session.chatId());
+        log.info("final_report.sending chatId={}", session.chatId());
 
         try {
             ReportSnapshot snapshot = buildSnapshot(session, now, dailyLimit);
             notificationPort.sendFinalReport(session.chatId(), snapshot);
-            log.infof("final_report.sent chatId=%d applied=%d",
+            log.info("final_report.sent chatId={} applied={}",
                 session.chatId(), snapshot.applied());
         } catch (Exception ex) {
-            log.errorf(ex, "final_report.send_failed chatId=%d", session.chatId());
+            log.error("final_report.send_failed chatId={}", session.chatId(), ex);
         } finally {
             boolean cleared = sessionRepository.clear(session.chatId());
             if (cleared) {
-                log.infof("search_session.cleared chatId=%d reason=final_report", session.chatId());
+                log.info("search_session.cleared chatId={} reason=final_report", session.chatId());
             }
         }
     }

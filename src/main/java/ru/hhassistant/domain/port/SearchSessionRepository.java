@@ -6,31 +6,20 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
-/**
- * Порт управления поисковыми сессиями.
- */
+
 public interface SearchSessionRepository {
+  void start(long chatId, Instant startedAt);
 
-    /** Создаёт или заменяет запись поисковой сессии. */
-    void start(long chatId, Instant startedAt);
+  boolean clear(long chatId);
 
-    /** Сбрасывает сессию. Идемпотентно. Возвращает true если сессия была активной. */
-    boolean clear(long chatId);
+  Optional<SearchSession> find(long chatId);
 
-    Optional<SearchSession> find(long chatId);
+  List<SearchSession> findAllActive();
 
-    /** Все активные сессии — для scheduler'а, который проходит по всем пользователям. */
-    List<SearchSession> findAllActive();
+  Optional<HourlySlotClaim> tryClaimHourlySlot(long chatId, Instant now);
 
-    /**
-     * Атомарно занимает текущий hourly-слот.
-     * Возвращает {@code Optional.empty()} если слот уже занят или прошло меньше часа.
-     * В случае успеха возвращает пару (claimedSlot, previousSlot).
-     */
-    Optional<HourlySlotClaim> tryClaimHourlySlot(long chatId, Instant now);
+  void revertHourlySlot(long chatId, Integer previousSlot);
 
-    /** Откат hourly-слота после неудачной отправки. */
-    void revertHourlySlot(long chatId, Integer previousSlot);
-
-    record HourlySlotClaim(int claimedSlot, Integer previousSlot) {}
+  record HourlySlotClaim(int claimedSlot, Integer previousSlot) {
+  }
 }
