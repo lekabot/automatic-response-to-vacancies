@@ -1,8 +1,6 @@
-package ru.hhassistant.domain;
+package ru.hhassistant.domain.model;
 
 import org.junit.jupiter.api.Test;
-import ru.hhassistant.domain.model.VacancyStatus;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 class VacancyStatusTest {

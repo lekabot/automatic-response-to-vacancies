@@ -1,13 +1,10 @@
-package ru.hhassistant.infrastructure;
+package ru.hhassistant.infrastructure.hh;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import ru.hhassistant.infrastructure.hh.ApplyStatus;
-import ru.hhassistant.infrastructure.hh.HhApplyClient;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**

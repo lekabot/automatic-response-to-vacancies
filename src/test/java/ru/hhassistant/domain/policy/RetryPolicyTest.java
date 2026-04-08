@@ -1,10 +1,8 @@
-package ru.hhassistant.domain;
+package ru.hhassistant.domain.policy;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import ru.hhassistant.domain.policy.RetryPolicy;
-
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;

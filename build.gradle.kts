@@ -25,6 +25,7 @@ val testcontainersVersion: String by project
 val okhttpVersion: String by project
 val assertjVersion: String by project
 val mockitoVersion: String by project
+val lombokVersion: String by project
 
 // ─── Source sets ────────────────────────────────────────────────────────────
 
@@ -69,7 +70,6 @@ dependencies {
 
     // Core Quarkus
     implementation("io.quarkus:quarkus-arc")
-    implementation("io.quarkus:quarkus-lombok")
     implementation("io.quarkus:quarkus-resteasy-reactive-jackson")
     implementation("io.quarkus:quarkus-smallrye-health")
     implementation("io.quarkus:quarkus-scheduler")
@@ -101,6 +101,12 @@ dependencies {
     // HTTP client for hh.ru (authenticated web flows, cookie jar, interceptors)
     implementation("com.squareup.okhttp3:okhttp:${okhttpVersion}")
     implementation("com.squareup.okhttp3:logging-interceptor:${okhttpVersion}")
+
+    // Lombok
+    compileOnly("org.projectlombok:lombok:${lombokVersion}")
+    annotationProcessor("org.projectlombok:lombok:${lombokVersion}")
+    testCompileOnly("org.projectlombok:lombok:${lombokVersion}")
+    testAnnotationProcessor("org.projectlombok:lombok:${lombokVersion}")
 
     // Unit tests
     testImplementation("io.quarkus:quarkus-junit5")

@@ -1,10 +1,8 @@
-package ru.hhassistant.domain;
+package ru.hhassistant.domain.model;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import ru.hhassistant.domain.model.SearchSession;
-
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;

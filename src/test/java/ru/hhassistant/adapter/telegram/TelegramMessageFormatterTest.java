@@ -1,8 +1,7 @@
-package ru.hhassistant.adapter;
+package ru.hhassistant.adapter.telegram;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import ru.hhassistant.adapter.telegram.TelegramMessageFormatter;
 import ru.hhassistant.domain.model.ReportSnapshot;
 
 import java.time.Instant;
