@@ -73,17 +73,17 @@ public class HhApplyClient {
 
         for (int attempt = 0; attempt < MAX_INNER_RETRIES; attempt++) {
             if (System.currentTimeMillis() > deadline) {
-                log.warnf("apply.total_timeout vacancyId=%s attempt=%d", vacancyId, attempt);
+                log.warn("apply.total_timeout vacancyId={} attempt={}", vacancyId, attempt);
                 return ApplyOutcome.timeout();
             }
             try {
                 OkHttpClient attemptClient = buildAttemptClient(hhtoken, perAttemptTimeoutSec);
                 last = attemptOnce(vacancyId, resumeId, coverLetter, hhtoken, attemptClient);
             } catch (SocketTimeoutException ex) {
-                log.warnf("apply.attempt_timeout vacancyId=%s attempt=%d", vacancyId, attempt);
+                log.warn("apply.attempt_timeout vacancyId={} attempt={}", vacancyId, attempt);
                 last = ApplyOutcome.timeout();
             } catch (IOException ex) {
-                log.warnf("apply.attempt_transport_error vacancyId=%s attempt=%d error=%s",
+                log.warn("apply.attempt_transport_error vacancyId={} attempt={} error={}",
                     vacancyId, attempt, ex.getMessage());
                 last = ApplyOutcome.tempError("transport_error", ex.getMessage());
             }
@@ -110,7 +110,7 @@ public class HhApplyClient {
     ) throws IOException {
         String xsrf = resolveXsrf(hhtoken, client);
         if (xsrf == null) {
-            log.warnf("apply.no_xsrf vacancyId=%s", vacancyId);
+            log.warn("apply.no_xsrf vacancyId={}", vacancyId);
             return ApplyOutcome.authError("no_xsrf");
         }
 
@@ -134,7 +134,7 @@ public class HhApplyClient {
             .post(formBuilder.build())
             .build();
 
-        log.debugf("apply.request vacancyId=%s resumeHash=%s",
+        log.debug("apply.request vacancyId={} resumeHash={}",
             vacancyId, resumeId.substring(0, Math.min(8, resumeId.length())));
 
         try (Response response = httpExecutor.execute(request)) {
@@ -174,7 +174,7 @@ public class HhApplyClient {
     ) {
         // 429 → rate limit
         if (code == 429) {
-            log.warnf("apply.rate_limited vacancyId=%s", vacancyId);
+            log.warn("apply.rate_limited vacancyId={}", vacancyId);
             return new ApplyOutcome(ApplyStatus.TEMP_ERROR, 429, "http_429", true);
         }
         // 401/403 → auth
@@ -222,7 +222,7 @@ public class HhApplyClient {
             return new ApplyOutcome(ApplyStatus.TEMP_ERROR, code, "html_not_json", true);
         }
 
-        log.warnf("apply.unclassified_response vacancyId=%s code=%d snippet=%s",
+        log.warn("apply.unclassified_response vacancyId={} code={} snippet={}",
             vacancyId, code, bodyText.substring(0, Math.min(APPLY_BODY_SNIPPET, bodyText.length())));
         return new ApplyOutcome(ApplyStatus.TEMP_ERROR, code, "unclassified_response", true);
     }

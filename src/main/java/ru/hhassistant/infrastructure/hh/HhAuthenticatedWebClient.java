@@ -62,12 +62,12 @@ public class HhAuthenticatedWebClient {
         case "CODE_SEND_OK", "OTP_SEND_OK" -> LoginInitResult.otpRequired(session.getCookies(), xsrf, false);
         case "CODE_SEND_BLOCKED" -> LoginInitResult.otpRequired(session.getCookies(), xsrf, true);
         default -> {
-          log.warnf("hh.login.unknown_key key=%s", key);
+          log.warn("hh.login.unknown_key key={}", key);
           yield LoginInitResult.error("Неожиданный ответ от hh.ru: key=" + key);
         }
       };
     } catch (Exception ex) {
-      log.errorf(ex, "hh.login.initiate_error email=%s", email.substring(0, 3) + "***");
+      log.error("hh.login.initiate_error email={}", email.substring(0, 3) + "***");
       return LoginInitResult.error(ex.getMessage());
     }
   }
@@ -137,7 +137,7 @@ public class HhAuthenticatedWebClient {
       String html = session.getHtml(WEB_BASE + "/applicant/resumes");
       result = parseResumesFromHtml(html);
     } catch (Exception ex) {
-      log.warnf("hh.get_resumes.error error=%s", ex.getMessage());
+      log.warn("hh.get_resumes.error error={}", ex.getMessage());
     }
     return result;
   }
