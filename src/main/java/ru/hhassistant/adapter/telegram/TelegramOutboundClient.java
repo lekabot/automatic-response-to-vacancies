@@ -68,7 +68,7 @@ public class TelegramOutboundClient implements NotificationPort {
       if (keyboard != null) req = req.replyMarkup(keyboard);
       SendResponse resp = bot.execute(req);
       if (!resp.isOk()) {
-        log.warn("telegram.send_failed chatId={} code=%d desc={}", chatId, resp.errorCode(), resp.description());
+        log.warn("telegram.send_failed chatId={} code={} desc={}", chatId, resp.errorCode(), resp.description());
       }
     } catch (Exception ex) {
       log.error("telegram.send_exception chatId={}}", chatId);

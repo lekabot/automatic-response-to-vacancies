@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 import ru.hhassistant.config.HhConfig;
 import ru.hhassistant.domain.port.UserSettingsRepository;
+import ru.hhassistant.infrastructure.html.HhHtmlExtractor;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,7 +28,7 @@ public class HhAuthenticatedWebClient {
   static final String WEB_BASE = "https://hh.ru";
   private static final String LOGIN_URL = WEB_BASE + "/account/login?role=applicant&backurl=%2F";
 
-  private static final Pattern XSRF_TOKEN_RE = Pattern.compile("\"xsrfToken\"\\s*:\\s*\"([a-f0-9]{32})\"");
+  private static final Pattern XSRF_TOKEN_RE = Pattern.compile("\"xsrfToken\"\\s*:\\s*\"([a-zA-Z0-9_\\-]{16,64})\"");
   private static final Pattern RESUME_ID_RE = Pattern.compile("/resume/([a-zA-Z0-9]+)");
 
 
@@ -67,7 +68,7 @@ public class HhAuthenticatedWebClient {
         }
       };
     } catch (Exception ex) {
-      log.error("hh.login.initiate_error email={}", email.substring(0, 3) + "***");
+      log.error("hh.login.initiate_error email={} error={}", email.substring(0, Math.min(3, email.length())) + "***", ex.getMessage());
       return LoginInitResult.error(ex.getMessage());
     }
   }
@@ -95,6 +96,7 @@ public class HhAuthenticatedWebClient {
       if (hhtoken == null) return LoginResult.failed("Не удалось получить hhtoken после входа по паролю");
       return LoginResult.success(hhtoken);
     } catch (Exception ex) {
+      log.warn("hh.login.password_error email={} error={}", email.substring(0, Math.min(3, email.length())) + "***", ex.getMessage());
       return LoginResult.failed(ex.getMessage());
     }
   }
@@ -123,6 +125,7 @@ public class HhAuthenticatedWebClient {
       if (hhtoken == null) return LoginResult.failed("Неверный код или не удалось получить hhtoken");
       return LoginResult.success(hhtoken);
     } catch (Exception ex) {
+      log.warn("hh.login.otp_error email={} error={}", email.substring(0, Math.min(3, email.length())) + "***", ex.getMessage());
       return LoginResult.failed(ex.getMessage());
     }
   }
@@ -250,6 +253,8 @@ public class HhAuthenticatedWebClient {
     String extractXsrf(String html) {
       var m = XSRF_TOKEN_RE.matcher(html);
       if (m.find()) return m.group(1);
+      String fromDom = HhHtmlExtractor.extractXsrfFromHtml(html);
+      if (fromDom != null) return fromDom;
       return cookies.get("_xsrf");
     }
 

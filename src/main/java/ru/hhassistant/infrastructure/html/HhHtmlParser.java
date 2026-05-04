@@ -19,6 +19,9 @@ import java.util.regex.Pattern;
 @Slf4j
 @ApplicationScoped
 public class HhHtmlParser {
+  @Inject
+  ObjectMapper objectMapper;
+
   private static final Pattern INITIAL_STATE_RE = Pattern.compile(
     "window\\.__initial_state__\\s*=\\s*(\\{.+?})(?:;|</script>)",
     Pattern.DOTALL
@@ -35,9 +38,6 @@ public class HhHtmlParser {
     "vacancy has been deleted", "vacancy not found",
     "нет активных вакансий"
   );
-
-  @Inject
-  ObjectMapper objectMapper;
 
   public List<VacancyCandidate> parseVacanciesFromSearchPage(String html) {
     if (html == null || html.isBlank()) return List.of();

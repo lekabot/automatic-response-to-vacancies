@@ -15,7 +15,6 @@ import ru.hhassistant.infrastructure.hh.HhPublicApiClient;
 import ru.hhassistant.infrastructure.hh.HhSessionValidator;
 
 import java.time.Clock;
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +88,7 @@ public class SearchSessionService {
       }
       case TEMP_UNAVAILABLE -> {
         log.warn("polling_cycle.hh_temp_unavailable chatId={}", chatId);
+        notificationPort.sendHhTempUnavailableWarning(chatId);
         return CycleOutcome.HH_TEMP_UNAVAILABLE;
       }
       case VALID -> {
@@ -144,10 +144,10 @@ public class SearchSessionService {
     }
 
     VacancyDecision decision = claimService.tryClaim(candidate, config, clock.instant());
-    if (!(decision instanceof VacancyDecision.Claimed claimed)) return;
+    if (!(decision instanceof VacancyDecision.Claimed(int attemptCount))) return;
 
     VacancyStatus result = applyService.applyAndPersist(
-      candidate, config, claimed.attemptCount(), hhtoken
+      candidate, config, attemptCount, hhtoken
     );
 
     log.info("vacancy.processed chatId={} vacancyId={} status={}",

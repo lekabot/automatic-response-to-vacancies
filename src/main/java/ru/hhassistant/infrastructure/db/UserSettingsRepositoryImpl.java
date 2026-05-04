@@ -20,11 +20,13 @@ import static ru.hhassistant.infrastructure.db.generated.Tables.USER_SETTINGS;
 @ApplicationScoped
 @Slf4j
 public class UserSettingsRepositoryImpl implements UserSettingsRepository {
+  @Inject
+  DSLContext dsl;
+  @Inject
+  ObjectMapper objectMapper;
 
-  @Inject DSLContext dsl;
-  @Inject ObjectMapper objectMapper;
-
-  private static final TypeReference<List<String>> LIST_OF_STRING = new TypeReference<>() {};
+  private static final TypeReference<List<String>> LIST_OF_STRING = new TypeReference<>() {
+  };
 
   @Override
   public Optional<UserSettingsRow> findByChatId(long chatId) {

@@ -130,6 +130,11 @@ public class TelegramCommandHandler {
         formatter.formatSettingsMenu(s.keywords(), s.coverLetter() != null, s.email(), s.resumeTitle()),
         mainMenuKeyboard());
     } else {
+      if (settingsOpt.isEmpty()) {
+        userSettingsRepository.save(new UserSettingsRepository.UserSettingsRow(
+          chatId, null, null, List.of(), null, null, null
+        ));
+      }
       userState.put(chatId, State.SETUP_KEYWORDS);
       outbound.sendHtml(chatId,
         "👋 <b>HH Vacancy Assistant</b>\n\nАвтоматические отклики на hh.ru. Настроим за 3 шага.\n\n"
@@ -178,9 +183,9 @@ public class TelegramCommandHandler {
       outbound.sendHtml(chatId, "❌ " + init.errorMessage());
       return;
     }
-    userCtx.computeIfAbsent(chatId, k -> new ConcurrentHashMap<>())
-      .put("pending_email", email);
-    userCtx.get(chatId).put("login_info", init);
+    var ctx = userCtx.computeIfAbsent(chatId, k -> new ConcurrentHashMap<>());
+    ctx.put("pending_email", email);
+    ctx.put("login_info", init);
 
     if (init.method() == HhAuthenticatedWebClient.LoginInitResult.Method.PASSWORD) {
       userState.put(chatId, State.SETUP_PASSWORD);
@@ -245,6 +250,8 @@ public class TelegramCommandHandler {
       outbound.sendHtml(chatId, "✅ Вход выполнен · Резюме: <b>" + TelegramMessageFormatter.esc(r.resumeTitle()) + "</b>");
       showMainMenu(chatId);
     } else {
+      userCtx.computeIfAbsent(chatId, k -> new ConcurrentHashMap<>())
+        .put("cached_resumes", resumes);
       outbound.sendHtml(chatId,
         "✅ Вход выполнен. Найдено " + resumes.size() + " резюме. Выберите одно:",
         resumeKeyboard(resumes));
@@ -252,13 +259,18 @@ public class TelegramCommandHandler {
     }
   }
 
+  @SuppressWarnings("unchecked")
   private void handleResumeSelected(long chatId, int messageId, String resumeId) {
-    var resumes = userSettingsRepository.findByChatId(chatId)
-      .map(r -> hhWebClient.getResumes(r.hhtoken())).orElse(List.of());
-    String title = resumes.stream()
+    List<UserSettingsRepository.UserSettingsRow> resumes =
+      (List<UserSettingsRepository.UserSettingsRow>)
+        userCtx.getOrDefault(chatId, Map.of()).get("cached_resumes");
+    String title = resumes != null
+      ? resumes.stream()
       .filter(r -> resumeId.equals(r.resumeId())).findFirst()
       .map(UserSettingsRepository.UserSettingsRow::resumeTitle)
-      .orElse(resumeId);
+      .orElse(resumeId)
+      : resumeId;
+    userCtx.remove(chatId);
     userSettingsRepository.updateResume(chatId, resumeId, title);
     outbound.editMessage(chatId, messageId, "✅ Резюме: <b>" + TelegramMessageFormatter.esc(title) + "</b>", null);
     showMainMenu(chatId);
@@ -309,18 +321,12 @@ public class TelegramCommandHandler {
 
   private static InlineKeyboardMarkup stopKeyboard() {
     return new InlineKeyboardMarkup(
-      new InlineKeyboardButton[]{
-        new InlineKeyboardButton("⏹ Остановить").callbackData("stop_search")
-      }
-    );
+      new InlineKeyboardButton("⏹ Остановить").callbackData("stop_search"));
   }
 
   private static InlineKeyboardMarkup skipLetterKeyboard() {
     return new InlineKeyboardMarkup(
-      new InlineKeyboardButton[]{
-        new InlineKeyboardButton("Без письма").callbackData("skip_letter")
-      }
-    );
+      new InlineKeyboardButton("Без письма").callbackData("skip_letter"));
   }
 
   private static InlineKeyboardMarkup resumeKeyboard(
@@ -337,10 +343,7 @@ public class TelegramCommandHandler {
 
   private static InlineKeyboardMarkup backKeyboard() {
     return new InlineKeyboardMarkup(
-      new InlineKeyboardButton[]{
-        new InlineKeyboardButton("◀️ Главное меню").callbackData("back_to_menu")
-      }
-    );
+      new InlineKeyboardButton("◀️ Главное меню").callbackData("back_to_menu"));
   }
 
   private void showMainMenu(long chatId) {
