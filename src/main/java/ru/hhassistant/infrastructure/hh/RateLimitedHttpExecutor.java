@@ -8,7 +8,8 @@ import okhttp3.Response;
 import ru.hhassistant.config.HhConfig;
 
 import java.io.IOException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 @ApplicationScoped
 public class RateLimitedHttpExecutor {
@@ -17,7 +18,7 @@ public class RateLimitedHttpExecutor {
   @Inject
   HhConfig hhConfig;
 
-  private final Object lock = new Object();
+  private final ReentrantLock lock = new ReentrantLock();
   private volatile double tokens;
   private volatile long lastRefillNanos = System.nanoTime();
 
@@ -29,20 +30,32 @@ public class RateLimitedHttpExecutor {
   private void acquireToken() {
     double qps = hhConfig.rateLimit().qps();
     double burst = hhConfig.rateLimit().burst();
+    long waitNanos = 0;
 
-    synchronized (lock) {
+    lock.lock();
+    try {
       refill(qps, burst);
       if (tokens < 1.0) {
-        long waitNanos = (long) ((1.0 - tokens) / qps * 1_000_000_000L);
-        try {
-          TimeUnit.NANOSECONDS.sleep(waitNanos);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new RuntimeException("Rate limiter interrupted", e);
-        }
-        refill(qps, burst);
+        waitNanos = (long) ((1.0 - tokens) / qps * 1_000_000_000L);
       }
-      tokens = Math.max(0, tokens - 1.0);
+      tokens = Math.max(0.0, tokens - 1.0);
+    } finally {
+      lock.unlock();
+    }
+
+    if (waitNanos > 0) {
+      // Sleep вне lock — виртуальные потоки паркуются без пиннинга carrier thread
+      LockSupport.parkNanos(waitNanos);
+      if (Thread.interrupted()) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException("Rate limiter interrupted");
+      }
+      lock.lock();
+      try {
+        refill(qps, burst);
+      } finally {
+        lock.unlock();
+      }
     }
   }
 

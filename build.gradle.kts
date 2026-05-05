@@ -182,6 +182,25 @@ tasks.jacocoTestReport {
     executionData.setFrom(
         fileTree(layout.buildDirectory).include("jacoco/*.exec")
     )
+    classDirectories.setFrom(
+        sourceSets.main.get().output.asFileTree.matching {
+            exclude(
+                // jOOQ generated code — not written by hand, no need to test
+                "ru/hhassistant/infrastructure/db/generated/**",
+                // CDI producers — trivial wiring, tested via integration
+                "ru/hhassistant/config/**",
+                "ru/hhassistant/infrastructure/InfrastructureProducers*",
+                // DB repository implementations — require real PostgreSQL (integration tests)
+                "ru/hhassistant/infrastructure/db/**",
+                // Telegram adapter — requires live bot/mock Telegram (integration tests)
+                "ru/hhassistant/adapter/telegram/**",
+                // Full web-auth flow — requires live HH.ru session (integration / contract tests)
+                "ru/hhassistant/infrastructure/hh/HhAuthenticatedWebClient*",
+                // Scheduler — time-driven, tested via integration tests
+                "ru/hhassistant/application/SearchSessionScheduler*",
+            )
+        }
+    )
     reports {
         xml.required.set(true)
         html.required.set(true)
@@ -268,16 +287,16 @@ jooq {
                         })
                     }
                     generate.apply {
-                        isDeprecated   = false
-                        isRecords      = true   // VACANCIES_SEEN → VacanciesSeenRecord
-                        isPojos        = false
+                        isDeprecated = false
+                        isRecords = true   // VACANCIES_SEEN → VacanciesSeenRecord
+                        isPojos = false
                         isFluentSetters = true
                         isJavaTimeTypes = true  // java.time.OffsetDateTime вместо Timestamp
-                        isDaos         = false
+                        isDaos = false
                     }
                     target.apply {
                         packageName = "ru.hhassistant.infrastructure.db.generated"
-                        directory   = "build/generated-sources/jooq/main"
+                        directory = "build/generated-sources/jooq/main"
                     }
                 }
             }

@@ -63,11 +63,9 @@ public class HhSessionValidator {
 
   private SessionValidationResult classify(Response response) throws IOException {
     int code = response.code();
-    String finalUrl = response.request().url().toString().toLowerCase();
-    String rawBody = response.body() != null ? response.body().string() : "";
-    // Ограничиваем размер для маркерного поиска; contentLength() не использовать после string()
-    String bodyLow = (rawBody.length() > 25_000 ? rawBody.substring(0, 25_000) : rawBody)
-      .toLowerCase();
+    var finalUrl = response.request().url().toString().toLowerCase();
+    var rawBody = response.body() != null ? response.body().string() : "";
+    var bodyLow = (rawBody.length() > 25_000 ? rawBody.substring(0, 25_000) : rawBody).toLowerCase();
 
     if (code == 429) {
       log.warn("session.temp_unavailable reason=http_429");
@@ -85,8 +83,7 @@ public class HhSessionValidator {
       log.warn("session.invalid reason=login_redirect");
       return SessionValidationResult.INVALID;
     }
-    boolean sessionDeadInBody = SESSION_DEAD_MARKERS.stream().anyMatch(bodyLow::contains)
-      && bodyLow.contains("account/login");
+    var sessionDeadInBody = SESSION_DEAD_MARKERS.stream().anyMatch(bodyLow::contains) && bodyLow.contains("account/login");
     if (sessionDeadInBody) {
       log.warn("session.invalid reason=session_expired_marker");
       return SessionValidationResult.INVALID;

@@ -92,7 +92,8 @@ public class HhPublicApiClient {
 
     try (Response response = httpExecutor.execute(request)) {
       if (!response.isSuccessful()) {
-        throw new IOException("HH API error: " + response.code() + " for keyword=" + keyword);
+        log.debug("api.error keyword='{}' code={}", keyword, response.code());
+        throw new IOException("HH API error: code=" + response.code());
       }
       String body = response.body() != null ? response.body().string() : "{}";
       return objectMapper.readTree(body);

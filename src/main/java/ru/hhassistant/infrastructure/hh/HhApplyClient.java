@@ -18,20 +18,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-/**
- * Выполняет отклик на вакансию через web-интерфейс hh.ru (не публичный API).
- *
- * <p>Endpoint: {@code POST https://hh.ru/applicant/vacancy_response/popup}
- *
- * <p>Требует:
- * <ol>
- *   <li>Cookie hhtoken (auth).</li>
- *   <li>X-XSRFToken (извлекается из cookie или HTML при необходимости).</li>
- * </ol>
- *
- * <p>Реализует внутренний retry (до 3 попыток) для сетевых/временных ошибок.
- * Retry-политика на уровне вакансии (межцикловый backoff) — в {@link ru.hhassistant.application.VacancyApplyService}.
- */
 @ApplicationScoped
 @Slf4j
 public class HhApplyClient {
@@ -46,8 +32,7 @@ public class HhApplyClient {
     "challenge", "antibot", "rate limit", "слишком много запросов"
   );
 
-  private static final Pattern XSRF_TOKEN_RE =
-    Pattern.compile("\"xsrfToken\"\\s*:\\s*\"([a-zA-Z0-9_\\-]{16,64})\"");
+  private static final Pattern XSRF_TOKEN_RE = Pattern.compile("\"xsrfToken\"\\s*:\\s*\"([a-zA-Z0-9_\\-]{16,64})\"");
 
   @Inject
   OkHttpClient httpClient;
@@ -58,16 +43,6 @@ public class HhApplyClient {
   @Inject
   ObjectMapper objectMapper;
 
-  /**
-   * Откликается на вакансию.
-   *
-   * @param vacancyId            ID вакансии hh.ru
-   * @param resumeId             ID резюме (hash)
-   * @param coverLetter          текст письма, пустая строка = без письма
-   * @param hhtoken              cookie auth token
-   * @param totalTimeoutSeconds  общий таймаут цикла retries
-   * @param perAttemptTimeoutSec таймаут одной попытки
-   */
   public ApplyOutcome apply(
     String vacancyId,
     String resumeId,
@@ -79,14 +54,26 @@ public class HhApplyClient {
     long deadline = System.currentTimeMillis() + totalTimeoutSeconds * 1000L;
     ApplyOutcome last = ApplyOutcome.permError("no_attempts");
 
+    OkHttpClient attemptClient = buildAttemptClient(hhtoken, perAttemptTimeoutSec);
+    String xsrf;
+    try {
+      xsrf = resolveXsrf(hhtoken, attemptClient);
+    } catch (IOException ex) {
+      log.warn("apply.xsrf_resolve_failed vacancyId={} error={}", vacancyId, ex.getMessage());
+      return ApplyOutcome.authError("xsrf_resolve_failed");
+    }
+    if (xsrf == null) {
+      log.warn("apply.no_xsrf vacancyId={}", vacancyId);
+      return ApplyOutcome.authError("no_xsrf");
+    }
+
     for (int attempt = 0; attempt < MAX_INNER_RETRIES; attempt++) {
       if (System.currentTimeMillis() > deadline) {
         log.warn("apply.total_timeout vacancyId={} attempt={}", vacancyId, attempt);
         return ApplyOutcome.timeout();
       }
       try {
-        OkHttpClient attemptClient = buildAttemptClient(hhtoken, perAttemptTimeoutSec);
-        last = attemptOnce(vacancyId, resumeId, coverLetter, hhtoken, attemptClient);
+        last = attemptOnce(vacancyId, resumeId, coverLetter, hhtoken, xsrf, attemptClient);
       } catch (SocketTimeoutException ex) {
         log.warn("apply.attempt_timeout vacancyId={} attempt={}", vacancyId, attempt);
         last = ApplyOutcome.timeout();
@@ -96,8 +83,8 @@ public class HhApplyClient {
         last = ApplyOutcome.tempError("transport_error", ex.getMessage());
       }
 
-      if (!last.retryable()) return last;
-      if (last.status() == ApplyStatus.APPLIED || last.status() == ApplyStatus.ALREADY_APPLIED) {
+      if (!last.retryable() || last.status() == ApplyStatus.APPLIED
+        || last.status() == ApplyStatus.ALREADY_APPLIED) {
         return last;
       }
       if (attempt < MAX_INNER_RETRIES - 1) {
@@ -113,17 +100,10 @@ public class HhApplyClient {
     return last;
   }
 
-  // ─── private ─────────────────────────────────────────────────────────────
-
   private ApplyOutcome attemptOnce(
-    String vacancyId, String resumeId, String coverLetter, String hhtoken, OkHttpClient client
+    String vacancyId, String resumeId, String coverLetter, String hhtoken,
+    String xsrf, OkHttpClient client
   ) throws IOException {
-    String xsrf = resolveXsrf(hhtoken, client);
-    if (xsrf == null) {
-      log.warn("apply.no_xsrf vacancyId={}", vacancyId);
-      return ApplyOutcome.authError("no_xsrf");
-    }
-
     FormBody.Builder formBuilder = new FormBody.Builder()
       .add("vacancy_id", vacancyId)
       .add("resume_hash", resumeId.split("\\?")[0])
@@ -159,8 +139,6 @@ public class HhApplyClient {
   }
 
   private String resolveXsrf(String hhtoken, OkHttpClient client) throws IOException {
-    // Пробуем сначала из cookies
-    // В нашей архитектуре каждый запрос stateless — XSRF получаем из корневой страницы
     Request homeReq = new Request.Builder()
       .url(WEB_BASE + "/")
       .header("Cookie", "hhtoken=" + hhtoken)
@@ -187,21 +165,17 @@ public class HhApplyClient {
   public static ApplyOutcome classifyResponse(
     String vacancyId, int code, String bodyText, JsonNode parsed
   ) {
-    // 429 → rate limit
     if (code == 429) {
       log.warn("apply.rate_limited vacancyId={}", vacancyId);
       return new ApplyOutcome(ApplyStatus.TEMP_ERROR, 429, "http_429", true);
     }
-    // 401/403 → auth
     if (code == 401 || code == 403) {
       return new ApplyOutcome(ApplyStatus.AUTH_ERROR, code, "http_auth", false);
     }
-    // 5xx → temp
     if (code >= 500) {
       return new ApplyOutcome(ApplyStatus.TEMP_ERROR, code, "http_5xx", true);
     }
 
-    // Проверяем JSON body
     if (parsed != null && !parsed.isMissingNode()) {
       JsonNode err = parsed.path("error");
       if (err.isMissingNode()) err = parsed.path("errors");
@@ -221,7 +195,6 @@ public class HhApplyClient {
       }
     }
 
-    // HTML-тело вместо JSON
     String bodyLow = bodyText.substring(0, Math.min(30000, bodyText.length())).toLowerCase();
     if (CHALLENGE_MARKERS.stream().anyMatch(bodyLow::contains)) {
       return new ApplyOutcome(ApplyStatus.TEMP_ERROR, code, "challenge_or_captcha", true);

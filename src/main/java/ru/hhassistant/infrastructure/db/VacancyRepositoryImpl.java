@@ -24,8 +24,7 @@ import static ru.hhassistant.infrastructure.db.generated.Tables.VACANCIES_SEEN;
 
 @ApplicationScoped
 public class VacancyRepositoryImpl implements VacancyRepository {
-
-    private static final int MAX_LAST_ERROR_LEN = 1000;
+  private static final int MAX_LAST_ERROR_LEN = 1000;
 
   @Inject
   DSLContext dsl;
@@ -46,9 +45,9 @@ public class VacancyRepositoryImpl implements VacancyRepository {
         .select()
         .from(VACANCIES_SEEN)
         .where(VACANCIES_SEEN.CHAT_ID.eq(chatId), VACANCIES_SEEN.VACANCY_ID.eq(vacancyId))
+        .forUpdate()
         .fetchOne();
 
-      // Удаляем устаревшие записи
       if (row != null) {
         OffsetDateTime seenAt = row.get(VACANCIES_SEEN.SEEN_AT);
         if (seenAt != null && seenAt.isBefore(retentionCutoff)) {
@@ -83,7 +82,6 @@ public class VacancyRepositoryImpl implements VacancyRepository {
           }
         }
 
-        // Клеймируем
         int newAttempts = attempts + 1;
         tx.update(VACANCIES_SEEN)
           .set(VACANCIES_SEEN.STATUS, VacancyStatus.IN_PROGRESS.name())
@@ -102,8 +100,8 @@ public class VacancyRepositoryImpl implements VacancyRepository {
         return new VacancyDecision.Claimed(newAttempts);
       }
 
-      // Новая вакансия — INSERT
-      tx.insertInto(VACANCIES_SEEN)
+
+      int inserted = tx.insertInto(VACANCIES_SEEN)
         .set(VACANCIES_SEEN.CHAT_ID, chatId)
         .set(VACANCIES_SEEN.VACANCY_ID, vacancyId)
         .set(VACANCIES_SEEN.TITLE, title)
@@ -115,7 +113,12 @@ public class VacancyRepositoryImpl implements VacancyRepository {
         .set(VACANCIES_SEEN.LAST_ATTEMPT_AT, nowOdt)
         .set(VACANCIES_SEEN.PROCESSING_STARTED_AT, nowOdt)
         .set(VACANCIES_SEEN.SEEN_AT, nowOdt)
+        .onConflict(VACANCIES_SEEN.CHAT_ID, VACANCIES_SEEN.VACANCY_ID)
+        .doNothing()
         .execute();
+      if (inserted == 0) {
+        return new VacancyDecision.SkipInProgress(now.plusSeconds((long) leaseMinutes * 60), 0);
+      }
       return new VacancyDecision.Claimed(1);
     });
   }
@@ -286,8 +289,6 @@ public class VacancyRepositoryImpl implements VacancyRepository {
     return Optional.of(mapToState(row));
   }
 
-  // ─── mapping helpers ──────────────────────────────────────────────────────
-
   private VacancyProcessingState mapToState(Record r) {
     return new VacancyProcessingState(
       r.get(VACANCIES_SEEN.CHAT_ID),
@@ -305,8 +306,6 @@ public class VacancyRepositoryImpl implements VacancyRepository {
       toInstant(r.get(VACANCIES_SEEN.SEEN_AT))
     );
   }
-
-  // ─── private helpers ──────────────────────────────────────────────────────
 
   private static String truncate(String s, int maxLen) {
     if (s == null) return null;

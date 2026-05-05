@@ -16,7 +16,10 @@ public record ApplyOutcome(
   }
 
   public static ApplyOutcome tempError(String errorCode, String detail) {
-    return new ApplyOutcome(ApplyStatus.TEMP_ERROR, null, errorCode, true);
+    String combined = detail != null && !detail.isBlank()
+      ? errorCode + ": " + detail
+      : errorCode;
+    return new ApplyOutcome(ApplyStatus.TEMP_ERROR, null, combined, true);
   }
 
   public static ApplyOutcome permError(String errorCode) {

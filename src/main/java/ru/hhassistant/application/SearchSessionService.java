@@ -67,19 +67,19 @@ public class SearchSessionService {
   public CycleOutcome executeCycle(SearchSession session) {
     long chatId = session.chatId();
 
-    Optional<UserSearchConfig> configOpt = buildUserSearchConfig(chatId);
+    var configOpt = buildUserSearchConfig(chatId);
     if (configOpt.isEmpty()) {
       log.warn("polling_cycle.config_missing chatId={}", chatId);
       return CycleOutcome.CONFIG_MISSING;
     }
-    UserSearchConfig config = configOpt.get();
+    var config = configOpt.get();
     if (!config.isComplete()) {
       log.warn("polling_cycle.config_incomplete chatId={}", chatId);
       return CycleOutcome.CONFIG_MISSING;
     }
 
-    String hhtoken = getHhtoken(config);
-    SessionValidationResult validation = sessionValidator.validate(hhtoken);
+    var hhtoken = config.hhtoken();
+    var validation = sessionValidator.validate(hhtoken);
     switch (validation) {
       case INVALID -> {
         log.error("polling_cycle.session_invalid chatId={}", chatId);
@@ -130,9 +130,7 @@ public class SearchSessionService {
     return CycleOutcome.COMPLETED;
   }
 
-  private void processOneVacancy(
-    VacancyCandidate candidate, UserSearchConfig config, String hhtoken, SearchSession session
-  ) {
+  private void processOneVacancy(VacancyCandidate candidate, UserSearchConfig config, String hhtoken, SearchSession session) {
     if (candidate.hasTest()) {
       claimService.recordSkipped(candidate, config, VacancyStatus.REQUIRES_TEST, clock.instant());
       return;
@@ -203,10 +201,5 @@ public class SearchSessionService {
         hhConfig.search().applyPerAttemptTimeoutSeconds()
       )
     );
-  }
-
-  private String getHhtoken(UserSearchConfig config) {
-    // hhtoken уже загружен в buildUserSearchConfig — нет смысла делать второй запрос
-    return config.hhtoken();
   }
 }
